@@ -1,0 +1,26 @@
+[application]
+
+[desktop]
+# Minimum window size
+width = "1024px"
+height = "768px"
+
+[web.app]
+
+# HTML title tag content
+title = "GTLLM"
+
+# include `assets` in web platform
+[web.resource]
+
+# Additional CSS style files
+style = []
+
+# Additional JavaScript files
+script = []
+
+[web.resource.dev]
+
+# Javascript code file
+# serve: [dev-server] only
+script = []
