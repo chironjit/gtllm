@@ -373,9 +373,8 @@ fn App() -> Element {
                                     ChatMode::PvP => rsx! {
                                         PvP {
                                             theme,
-                                            messages,
+                                            client: openrouter_client.read().clone(),
                                             input_settings,
-                                            on_send: move |text| send_arena_message(text, ChatMode::PvP),
                                         }
                                     },
                                     ChatMode::Collaborative => rsx! {
