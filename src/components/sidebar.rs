@@ -64,10 +64,11 @@ pub fn Sidebar(
                         if sessions.read().is_empty() {
                             if !is_collapsed {
                                 div {
-                                    class: "px-3 py-8 text-center",
-                                    div {
-                                        class: "text-4xl mb-2 opacity-50",
-                                        "💭"
+                                    class: "px-3 py-6 text-center flex flex-col items-center",
+                                    img {
+                                        src: asset!("/assets/no_chats.svg"),
+                                        class: "w-12 h-12 mb-2 opacity-50",
+                                        alt: "No chats"
                                     }
                                     p {
                                         class: "text-xs text-[var(--color-base-content)]/60",
@@ -88,9 +89,9 @@ pub fn Sidebar(
                                             onclick: move |_| on_select_session.call(session_id),
                                             class: "w-full rounded-lg transition-all duration-200",
                                             class: if is_collapsed {
-                                                "p-2.5 flex items-center justify-center"
+                                                "p-2 flex items-center justify-center"
                                             } else {
-                                                "text-left px-3 py-2.5"
+                                                "text-left px-2.5 py-2"
                                             },
                                             class: if is_active {
                                                 "bg-[var(--color-primary)]/10 border border-[var(--color-primary)]"
@@ -127,29 +128,29 @@ pub fn Sidebar(
                                             } else {
                                                 // Expanded view: full layout
                                                 div {
-                                                    class: "flex items-center gap-3",
+                                                    class: "flex items-center gap-2.5",
 
                                                     // Mode icon
                                                     div {
                                                         class: "shrink-0",
                                                         match session.mode.name() {
                                                             "Standard" => rsx! {
-                                                                img { src: asset!("/assets/message.svg"), class: "w-4 h-4", alt: "Standard" }
+                                                                img { src: asset!("/assets/message.svg"), class: "w-3.5 h-3.5", alt: "Standard" }
                                                             },
                                                             "PvP" => rsx! {
-                                                                img { src: asset!("/assets/pvp.svg"), class: "w-4 h-4", alt: "PvP" }
+                                                                img { src: asset!("/assets/pvp.svg"), class: "w-3.5 h-3.5", alt: "PvP" }
                                                             },
                                                             "Collaborative" => rsx! {
-                                                                img { src: asset!("/assets/collaborative.svg"), class: "w-4 h-4", alt: "Collaborative" }
+                                                                img { src: asset!("/assets/collaborative.svg"), class: "w-3.5 h-3.5", alt: "Collaborative" }
                                                             },
                                                             "Competitive" => rsx! {
-                                                                img { src: asset!("/assets/competitive.svg"), class: "w-4 h-4", alt: "Competitive" }
+                                                                img { src: asset!("/assets/competitive.svg"), class: "w-3.5 h-3.5", alt: "Competitive" }
                                                             },
                                                             "LLM's Choice" => rsx! {
-                                                                img { src: asset!("/assets/choice.svg"), class: "w-4 h-4", alt: "Choice" }
+                                                                img { src: asset!("/assets/choice.svg"), class: "w-3.5 h-3.5", alt: "Choice" }
                                                             },
                                                             _ => rsx! {
-                                                                img { src: asset!("/assets/message.svg"), class: "w-4 h-4", alt: "Chat" }
+                                                                img { src: asset!("/assets/message.svg"), class: "w-3.5 h-3.5", alt: "Chat" }
                                                             },
                                                         }
                                                     }
@@ -158,11 +159,11 @@ pub fn Sidebar(
                                                     div {
                                                         class: "flex-1 min-w-0",
                                                         div {
-                                                            class: "text-sm font-medium text-[var(--color-base-content)] truncate",
+                                                            class: "text-xs font-medium text-[var(--color-base-content)] truncate",
                                                             "{session.title}"
                                                         }
                                                         div {
-                                                            class: "text-xs text-[var(--color-base-content)]/60 mt-0.5",
+                                                            class: "text-[10px] text-[var(--color-base-content)]/50 mt-0.5",
                                                             "{session.timestamp}"
                                                         }
                                                     }
