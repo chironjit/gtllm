@@ -20,6 +20,24 @@ impl Theme {
         ]
     }
 
+    /// Parse a theme from a string
+    pub fn from_str(s: &str) -> Option<Theme> {
+        match s.to_lowercase().as_str() {
+            "winter" => Some(Theme::Winter),
+            "black" => Some(Theme::Black),
+            "nord" => Some(Theme::Nord),
+            "dracula" => Some(Theme::Dracula),
+            "night" => Some(Theme::Night),
+            "dim" => Some(Theme::Dim),
+            _ => None,
+        }
+    }
+
+    /// Convert theme to a string identifier
+    pub fn to_string_id(&self) -> &'static str {
+        self.data_theme()
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Theme::Winter => "Winter",

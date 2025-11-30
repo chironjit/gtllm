@@ -1,9 +1,15 @@
-use crate::utils::{ChatMode, Theme};
+use crate::utils::{ChatMode, Settings, Theme};
 use dioxus::prelude::*;
 
 #[component]
-pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> Element {
+pub fn NewChat(
+    theme: Signal<Theme>,
+    app_settings: Signal<Settings>,
+    on_mode_select: EventHandler<ChatMode>,
+    on_open_settings: EventHandler<()>,
+) -> Element {
     let _ = theme.read();
+    let has_api_key = app_settings.read().has_api_key();
 
     rsx! {
         div {
@@ -21,7 +27,37 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
                     }
                     p {
                         class: "text-sm text-[var(--color-base-content)]/80",
-                        "Game Theory meets Large Language Models - Choose your chat mode"
+                        "Choose your chat mode"
+                    }
+                }
+
+                // API Key Warning Banner
+                if !has_api_key {
+                    div {
+                        class: "mb-4 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/50",
+                        div {
+                            class: "flex items-center gap-2",
+                            div {
+                                class: "flex-shrink-0 text-lg",
+                                "⚠️"
+                            }
+                            div {
+                                class: "flex-1 min-w-0",
+                                p {
+                                    class: "text-xs text-[var(--color-base-content)]/80",
+                                    span {
+                                        class: "font-semibold",
+                                        "API Key Required: "
+                                    }
+                                    "Configure your OpenRouter API key in settings to use the app."
+                                }
+                            }
+                            button {
+                                onclick: move |_| on_open_settings.call(()),
+                                class: "flex-shrink-0 px-3 py-1.5 rounded bg-[var(--color-primary)] text-[var(--color-primary-content)] hover:bg-[var(--color-primary)]/90 text-xs font-medium transition-all duration-200",
+                                "Settings"
+                            }
+                        }
                     }
                 }
 
@@ -31,8 +67,17 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
 
                     // Standard mode
                     button {
-                        onclick: move |_| on_mode_select.call(ChatMode::Standard),
-                        class: "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group",
+                        onclick: move |_| {
+                            if has_api_key {
+                                on_mode_select.call(ChatMode::Standard);
+                            }
+                        },
+                        disabled: !has_api_key,
+                        class: if has_api_key {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group"
+                        } else {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] transition-all duration-200 text-left opacity-50 cursor-not-allowed"
+                        },
 
                         div {
                             class: "flex items-start gap-3",
@@ -49,7 +94,7 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
                                 }
                                 p {
                                     class: "text-xs text-[var(--color-base-content)]/70",
-                                    "Single LLM chat - Traditional one-on-one conversation with an AI assistant"
+                                    "Traditional conversation with one or more LLMs"
                                 }
                             }
                         }
@@ -57,8 +102,17 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
 
                     // PvP mode
                     button {
-                        onclick: move |_| on_mode_select.call(ChatMode::PvP),
-                        class: "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group",
+                        onclick: move |_| {
+                            if has_api_key {
+                                on_mode_select.call(ChatMode::PvP);
+                            }
+                        },
+                        disabled: !has_api_key,
+                        class: if has_api_key {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group"
+                        } else {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] transition-all duration-200 text-left opacity-50 cursor-not-allowed"
+                        },
 
                         div {
                             class: "flex items-start gap-3",
@@ -75,7 +129,7 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
                                 }
                                 p {
                                     class: "text-xs text-[var(--color-base-content)]/70",
-                                    "2 bots compete, 1 moderator judges - Watch AI models battle it out"
+                                    "2 LLMs compete, 1 LLM moderates"
                                 }
                             }
                         }
@@ -83,8 +137,17 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
 
                     // Collaborative mode
                     button {
-                        onclick: move |_| on_mode_select.call(ChatMode::Collaborative),
-                        class: "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group",
+                        onclick: move |_| {
+                            if has_api_key {
+                                on_mode_select.call(ChatMode::Collaborative);
+                            }
+                        },
+                        disabled: !has_api_key,
+                        class: if has_api_key {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group"
+                        } else {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] transition-all duration-200 text-left opacity-50 cursor-not-allowed"
+                        },
 
                         div {
                             class: "flex items-start gap-3",
@@ -101,7 +164,7 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
                                 }
                                 p {
                                     class: "text-xs text-[var(--color-base-content)]/70",
-                                    "Multiple bots jointly agree on best solution - Teamwork makes the dream work"
+                                    "Multiple LLMs jointly agree on best solution"
                                 }
                             }
                         }
@@ -109,8 +172,17 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
 
                     // Competitive mode
                     button {
-                        onclick: move |_| on_mode_select.call(ChatMode::Competitive),
-                        class: "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group",
+                        onclick: move |_| {
+                            if has_api_key {
+                                on_mode_select.call(ChatMode::Competitive);
+                            }
+                        },
+                        disabled: !has_api_key,
+                        class: if has_api_key {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group"
+                        } else {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] transition-all duration-200 text-left opacity-50 cursor-not-allowed"
+                        },
 
                         div {
                             class: "flex items-start gap-3",
@@ -127,7 +199,7 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
                                 }
                                 p {
                                     class: "text-xs text-[var(--color-base-content)]/70",
-                                    "All bots vote for the best (can't vote for their own) - Democracy in action"
+                                    "All LLMs vote for the best answer"
                                 }
                             }
                         }
@@ -135,8 +207,17 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
 
                     // Choice mode
                     button {
-                        onclick: move |_| on_mode_select.call(ChatMode::LLMChoice),
-                        class: "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group md:col-span-2",
+                        onclick: move |_| {
+                            if has_api_key {
+                                on_mode_select.call(ChatMode::LLMChoice);
+                            }
+                        },
+                        disabled: !has_api_key,
+                        class: if has_api_key {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] hover:border-[var(--color-primary)] transition-all duration-200 text-left group md:col-span-2"
+                        } else {
+                            "p-4 rounded-lg bg-[var(--color-base-200)] border-2 border-[var(--color-base-300)] transition-all duration-200 text-left opacity-50 cursor-not-allowed md:col-span-2"
+                        },
 
                         div {
                             class: "flex items-start gap-3",
@@ -153,7 +234,7 @@ pub fn NewChat(theme: Signal<Theme>, on_mode_select: EventHandler<ChatMode>) -> 
                                 }
                                 p {
                                     class: "text-xs text-[var(--color-base-content)]/70",
-                                    "LLMs decide to collaborate or compete - Let the AI choose its own strategy"
+                                    "LLMs decide to collaborate or compete - let the LLMs choose its own strategy"
                                 }
                             }
                         }

@@ -4,9 +4,10 @@ mod components;
 mod utils;
 
 use components::{
-    Choice, Collaborative, Competitive, Header, NewChat, PvP, Settings, Sidebar, Standard,
+    Choice, Collaborative, Competitive, Header, NewChat, PvP, Settings as SettingsView, Sidebar, Standard,
 };
-use utils::{AppView, ArenaMessage, ChatMode, ChatSession, InputSettings, Message, Theme};
+use utils::{AppView, ArenaMessage, ChatMode, ChatSession, InputSettings, Message, OpenRouterClient, Settings, Theme};
+use std::sync::Arc;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
@@ -16,11 +17,30 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    // Theme state (default to Dracula)
-    let mut theme = use_signal(|| Theme::Dracula);
+    // Load settings from disk on startup
+    let mut app_settings = use_signal(|| {
+        Settings::load().unwrap_or_else(|e| {
+            eprintln!("Failed to load settings: {}", e);
+            Settings::default()
+        })
+    });
+
+    // Create OpenRouter client if API key exists
+    let mut openrouter_client = use_signal(|| {
+        app_settings.read().get_api_key().map(|key| {
+            Arc::new(OpenRouterClient::new(key.to_string()))
+        })
+    });
+
+    // Theme state - load from settings
+    let mut theme = use_signal(|| {
+        let settings = app_settings.read();
+        // Parse theme from settings, default to Dracula if parsing fails
+        Theme::from_str(&settings.theme).unwrap_or(Theme::Dracula)
+    });
 
     // Sidebar state (default to open)
-    let mut sidebar_collapsed = use_signal(|| false);
+    let sidebar_collapsed = use_signal(|| false);
 
     // Current view state
     let mut current_view = use_signal(|| AppView::NewChat);
@@ -46,18 +66,52 @@ fn App() -> Element {
     // Handler for toggling dark/light mode
     let toggle_mode = move |_| {
         let current_theme = *theme.read();
-        if current_theme.is_dark() {
+        let new_theme = if current_theme.is_dark() {
             // Switch to first light theme
-            theme.set(Theme::Winter);
+            Theme::Winter
         } else {
             // Switch to first dark theme
-            theme.set(Theme::Dracula);
-        }
+            Theme::Dracula
+        };
+        theme.set(new_theme);
+
+        // Save theme to settings
+        let mut settings = app_settings.write();
+        settings.theme = new_theme.to_string_id().to_string();
+        settings.theme_mode = if new_theme.is_dark() {
+            utils::ThemeMode::Dark
+        } else {
+            utils::ThemeMode::Light
+        };
+        let _ = settings.save();
     };
 
     // Handler for changing theme within mode
     let change_theme = move |new_theme: Theme| {
         theme.set(new_theme);
+
+        // Save theme to settings
+        let mut settings = app_settings.write();
+        settings.theme = new_theme.to_string_id().to_string();
+        settings.theme_mode = if new_theme.is_dark() {
+            utils::ThemeMode::Dark
+        } else {
+            utils::ThemeMode::Light
+        };
+        let _ = settings.save();
+    };
+
+    // Handler for saving API key
+    let save_api_key = move |api_key: String| {
+        let mut settings = app_settings.write();
+        settings.set_api_key(api_key.clone());
+        if let Err(e) = settings.save() {
+            eprintln!("Failed to save API key: {}", e);
+            return;
+        }
+
+        // Recreate OpenRouter client with new API key
+        openrouter_client.set(Some(Arc::new(OpenRouterClient::new(api_key))));
     };
 
     // Handler for creating new chat
@@ -302,7 +356,9 @@ fn App() -> Element {
                             AppView::NewChat => rsx! {
                                 NewChat {
                                     theme,
+                                    app_settings,
                                     on_mode_select: select_mode,
+                                    on_open_settings: open_settings,
                                 }
                             },
                             AppView::ChatMode(mode) => {
@@ -310,9 +366,8 @@ fn App() -> Element {
                                     ChatMode::Standard => rsx! {
                                         Standard {
                                             theme,
-                                            messages,
+                                            client: openrouter_client.read().clone(),
                                             input_settings,
-                                            on_send: move |text| send_message(text),
                                         }
                                     },
                                     ChatMode::PvP => rsx! {
@@ -350,10 +405,12 @@ fn App() -> Element {
                                 }
                             },
                             AppView::Settings => rsx! {
-                                Settings {
+                                SettingsView {
                                     theme,
+                                    app_settings,
                                     input_settings,
                                     on_settings_change: change_input_settings,
+                                    on_api_key_save: save_api_key,
                                     on_close: close_settings,
                                 }
                             },
