@@ -2,8 +2,8 @@
 
 [desktop]
 # Minimum window size
-width = "1024px"
-height = "768px"
+width = "1280px"
+height = "720px"
 
 [web.app]
 

@@ -10,6 +10,7 @@ pub fn Header(
 ) -> Element {
     let theme_val = *theme.read();
     let is_dark = theme_val.is_dark();
+    let mut dropdown_open = use_signal(|| false);
 
     let available_themes = if is_dark {
         Theme::dark_themes()
@@ -45,28 +46,49 @@ pub fn Header(
                     div {
                         class: "flex items-center gap-3",
 
-                        // Theme dropdown
-                        select {
-                            value: "{theme_val.data_theme()}",
-                            onchange: move |evt| {
-                                let selected_name = evt.value();
-                                if let Some(new_theme) = Theme::all()
-                                    .into_iter()
-                                    .find(|t| t.data_theme() == selected_name)
-                                {
-                                    on_theme_change.call(new_theme);
-                                }
-                            },
-                            class: "px-3 py-1.5 rounded-lg text-sm font-medium border-2 focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] transition-all cursor-pointer",
-                            style: "background-color: var(--color-base-300); color: var(--color-base-content); border-color: var(--color-base-300);",
+                        // Theme dropdown (custom)
+                        div {
+                            class: "relative",
 
-                            for available_theme in available_themes.iter() {
-                                option {
-                                    key: "{available_theme.data_theme()}",
-                                    value: "{available_theme.data_theme()}",
-                                    selected: *available_theme == theme_val,
-                                    style: "background-color: var(--color-base-200); color: var(--color-base-content);",
-                                    "{available_theme.name()}"
+                            // Dropdown button
+                            button {
+                                onclick: move |_| dropdown_open.set(!dropdown_open()),
+                                class: "px-3 py-1.5 rounded-lg bg-[var(--color-base-300)] text-[var(--color-base-content)] text-sm font-medium border border-[var(--color-base-300)] hover:bg-[var(--color-base-300)]/80 focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] transition-all cursor-pointer flex items-center gap-2",
+                                "{theme_val.name()}"
+                                span {
+                                    class: "text-[10px] opacity-50",
+                                    if *dropdown_open.read() { "▲" } else { "▼" }
+                                }
+                            }
+
+                            // Dropdown menu
+                            if *dropdown_open.read() {
+                                div {
+                                    class: "absolute right-0 mt-2 w-32 bg-[var(--color-base-200)] border border-[var(--color-base-300)] rounded-lg shadow-lg z-50 overflow-hidden",
+
+                                    for available_theme in available_themes.iter() {
+                                        {
+                                            let theme_to_select = *available_theme;
+                                            let is_selected = theme_to_select == theme_val;
+
+                                            rsx! {
+                                                button {
+                                                    key: "{available_theme.data_theme()}",
+                                                    onclick: move |_| {
+                                                        on_theme_change.call(theme_to_select);
+                                                        dropdown_open.set(false);
+                                                    },
+                                                    class: "w-full px-3 py-2 text-left text-sm hover:bg-[var(--color-base-300)] transition-colors",
+                                                    class: if is_selected {
+                                                        "bg-[var(--color-primary)]/10 text-[var(--color-base-content)] font-semibold"
+                                                    } else {
+                                                        "text-[var(--color-base-content)]"
+                                                    },
+                                                    "{available_theme.name()}"
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

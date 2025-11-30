@@ -19,6 +19,9 @@ fn App() -> Element {
     // Theme state (default to Dracula)
     let mut theme = use_signal(|| Theme::Dracula);
 
+    // Sidebar state (default to open)
+    let mut sidebar_collapsed = use_signal(|| false);
+
     // Current view state
     let mut current_view = use_signal(|| AppView::NewChat);
 
@@ -274,6 +277,7 @@ fn App() -> Element {
                     theme,
                     sessions,
                     current_session,
+                    collapsed: sidebar_collapsed,
                     on_new_chat: new_chat,
                     on_select_session: select_session,
                 }
