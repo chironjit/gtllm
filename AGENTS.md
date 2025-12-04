@@ -1,8 +1,100 @@
+# GTLLM Project Overview
+
+**GTLLM** (Game Theory LLM) is a Rust-based desktop application built with **Dioxus 0.7** that implements a multi-LLM chat system inspired by game theory concepts. Uses OpenRouter APIs for inferencing
+
+### Key Features
+
+**5 Chat Modes:**
+1. **Standard** - Normal single (or multiple) LLMs in individual chats
+2. **PvP** - 2 LLMs compete with 1 moderator judging
+3. **Collaborative** - Multiple LLMs work together to agree on the best solution
+4. **Competitive** - LLMs propose solutions and vote on the best one (can't vote for their own)
+5. **LLM's Choice** - The LLMs decide whether to collaborate or compete
+
+### Tech Stack
+
+- **Framework**: Dioxus 0.7
+- **Styling**: Tailwind CSS
+- **HTTP Client**: reqwest 
+- **Async Runtime**: Tokio
+- **Serialization**: serde/serde_json
+
+### Project Structure
+```
+gtllm/
+├── src
+│   ├── main.rs
+│   ├── components
+│   │   ├── mod.rs                  
+│   │   ├── header.rs                   # Header component
+│   │   ├── sidebar.rs                  # Sidebar component
+│   │   └── modes                       # Main section - mainly chat modes but also includes settings page
+│   │       ├── mod.rs             
+│   │       ├── collaborative.rs
+│   │       ├── standard.rs
+│   │       ├── competitive.rs
+│   │       ├── choice.rs
+│   │       ├── new_chat.rs
+│   │       ├── pvp.rs
+│   │       ├── settings.rs
+│   │       └── common                  # Common components used by the modes
+│   │           ├── mod.rs
+│   │           ├── input.rs
+│   │           ├── model_selector.rs
+│   │           ├── chat.rs
+│   │           └── selection.rs
+│   └── utils
+│       ├── mod.rs
+│       ├── openrouter.rs               # OpenRouter API client
+│       ├── settings.rs                 # Settings persistence
+│       ├── theme.rs                    # Theme management
+│       ├── types.rs                    # Type definitions
+│       └── formatting.rs               # Output formatting
+├── guides                              # Guides to help with code generation
+│   ├── dioxus
+│   │   └── DIOXUS_COMPONENTS.md
+│   └── openrouter
+│       ├── API_REF.md
+│       ├── EMBEDDINGS.md
+│       ├── OTHERS.md
+│       └── STREAMING.md
+├── AGENTS.md                           # Agent / LLM instructions
+├── assets                              # Assets incl icons, images & generated files
+├── Cargo.lock
+├── Cargo.toml
+├── Dioxus.toml                           
+├── README.md
+└── tailwind.css
+```
+
+### Configuration
+
+- **OpenRouter API** for LLM access (requires API key in settings)
+- Settings stored persistently using `dirs` crate
+- Support multiple themes (Dracula, Winter, etc.)
+- Customizable input settings (Ctrl+Enter to submit)
+
+## Instructions
+1. This is a Dioxus 0.7 and Tailwind 4.0 app. Read the notes in this document on how to use the latest Dioxus version
+2. It is important to use the right code in the right place
+  - All CSS should be in TailwindCSS ( version 4.0 and above) classes only
+  - All theme-related items in `src/utils/theme.rs` and `tailwind.css`
+  - All type definition in `src/utils/types.rs`
+  - All generic input and output formatting related items in `src/utils/formatting.rs`
+  - All OpenRouter API relaten items in `src/utils/openrouter.rs`
+  - All settings persistence related code in `src/utils/settings.rs`
+  - Main section code in `src/components/modes/`. 
+  - Any common subcomponents for the modes should be in the `src/components/modes/common`. Before creating any component for any mode, check this folder
+3. Use the examples, documentation and code in the `guides` folder to help you witn your code
+
+---
+
+## Dioxus Notes
 You are an expert [0.7 Dioxus](https://dioxuslabs.com/learn/0.7) assistant. Dioxus 0.7 changes every api in dioxus. Only use this up to date documentation. `cx`, `Scope`, and `use_state` are gone
 
 Provide concise code examples with detailed descriptions
 
-# Dioxus Dependency
+### Dioxus Dependency
 
 You can add Dioxus to your `Cargo.toml` like this:
 
@@ -17,7 +109,7 @@ webview = ["dioxus/desktop"]
 server = ["dioxus/server"]
 ```
 
-# Launching your application
+### Launching your application
 
 You need to create a main function that sets up the Dioxus runtime and mounts your root component.
 
@@ -41,7 +133,7 @@ curl -sSL http://dioxus.dev/install.sh | sh
 dx serve
 ```
 
-# UI with RSX
+### UI with RSX
 
 ```rust
 rsx! {
@@ -64,7 +156,7 @@ rsx! {
 }
 ```
 
-# Assets
+### Assets
 
 The asset macro can be used to link to local files to use in your project. All links start with `/` and are relative to the root of your project.
 
@@ -77,7 +169,7 @@ rsx! {
 }
 ```
 
-## Styles
+#### Styles
 
 The `document::Stylesheet` component will inject the stylesheet into the `<head>` of the document
 
@@ -89,7 +181,7 @@ rsx! {
 }
 ```
 
-# Components
+### Components
 
 Components are the building blocks of apps
 
@@ -124,11 +216,11 @@ Each component accepts function arguments (props)
 * Props must implement `PartialEq` and `Clone`.
 * To make props reactive and copy, you can wrap the type in `ReadOnlySignal`. Any reactive state like memos and resources that read `ReadOnlySignal` props will automatically re-run when the prop changes.
 
-# State
+### State
 
 A signal is a wrapper around a value that automatically tracks where it's read and written. Changing a signal's value causes code that relies on the signal to rerun.
 
-## Local State
+#### Local State
 
 The `use_signal` hook creates state that is local to a single component. You can call the signal like a function (e.g. `my_signal()`) to clone the value, or use `.read()` to get a reference. `.write()` gets a mutable reference to the value.
 
@@ -155,7 +247,7 @@ fn Counter() -> Element {
 }
 ```
 
-## Context API
+#### Context API
 
 The Context API allows you to share state down the component tree. A parent provides the state using `use_context_provider`, and any child can access it with `use_context`
 
@@ -178,7 +270,7 @@ fn Child() -> Element {
 }
 ```
 
-# Async
+### Async
 
 For state that depends on an asynchronous operation (like a network request), Dioxus provides a hook called `use_resource`. This hook manages the lifecycle of the async task and provides the result to your component.
 
@@ -198,7 +290,7 @@ match dog() {
 }
 ```
 
-# Routing
+### Routing
 
 All possible routes are defined in a single Rust `enum` that derives `Routable`. Each variant represents a route and is annotated with `#[route("/path")]`. Dynamic Segments can capture parts of the URL path as parameters by using `:name` in the route string. These become fields in the enum variant.
 
@@ -234,7 +326,7 @@ fn App() -> Element {
 dioxus = { version = "0.7.1", features = ["router"] }
 ```
 
-# Fullstack
+### Fullstack
 
 Fullstack enables server rendering and ipc calls. It uses Cargo features (`server` and a client feature like `web`) to split the code into a server and client binaries.
 
@@ -242,7 +334,7 @@ Fullstack enables server rendering and ipc calls. It uses Cargo features (`serve
 dioxus = { version = "0.7.1", features = ["fullstack"] }
 ```
 
-## Server Functions
+#### Server Functions
 
 Use the `#[post]` / `#[get]` macros to define an `async` function that will only run on the server. On the server, this macro generates an API endpoint. On the client, it generates a function that makes an HTTP request to that endpoint.
 
@@ -254,11 +346,11 @@ async fn double_server(number: i32, path: String, query: i32) -> Result<i32, Ser
 }
 ```
 
-## Hydration
+#### Hydration
 
 Hydration is the process of making a server-rendered HTML page interactive on the client. The server sends the initial HTML, and then the client-side runs, attaches event listeners, and takes control of future rendering.
 
-### Errors
+##### Errors
 The initial UI rendered by the component on the client must be identical to the UI rendered on the server.
 
 * Use the `use_server_future` hook instead of `use_resource`. It runs the future on the server, serializes the result, and sends it to the client, ensuring the client has the data immediately for its first render.
