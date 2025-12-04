@@ -346,6 +346,7 @@ fn App() -> Element {
                         on_toggle_mode: toggle_mode,
                         on_theme_change: change_theme,
                         on_settings: open_settings,
+                        client: openrouter_client,
                     }
 
                     // Main content based on current view

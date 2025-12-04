@@ -161,6 +161,33 @@ pub struct ModelsResponse {
 }
 
 // ============================================================================
+// Credits Types
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreditsData {
+    pub total_credits: f64,
+    pub total_usage: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreditsResponse {
+    pub data: CreditsData,
+}
+
+impl CreditsData {
+    /// Get remaining credits (total_credits - total_usage)
+    pub fn remaining(&self) -> f64 {
+        self.total_credits - self.total_usage
+    }
+
+    /// Format remaining credits as a string with 2 decimal places
+    pub fn remaining_formatted(&self) -> String {
+        format!("${:.2}", self.remaining())
+    }
+}
+
+// ============================================================================
 // Stream Event Types
 // ============================================================================
 
@@ -248,6 +275,56 @@ impl OpenRouterClient {
             .map_err(|e| format!("Failed to parse models response: {}", e))?;
 
         Ok(models_response.data)
+    }
+
+    // ========================================================================
+    // Fetch Credits
+    // ========================================================================
+
+    pub async fn fetch_credits(&self) -> Result<CreditsData, String> {
+        let url = format!("{}/credits", OPENROUTER_API_BASE);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", APP_URL)
+            .header("X-Title", APP_NAME)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch credits: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+
+            // Try to parse as JSON error response
+            let error_message = if let Ok(error_response) = serde_json::from_str::<serde_json::Value>(&error_text) {
+                if let Some(error_obj) = error_response.get("error") {
+                    if let Some(message) = error_obj.get("message").and_then(|m| m.as_str()) {
+                        message.to_string()
+                    } else {
+                        error_text
+                    }
+                } else {
+                    error_text
+                }
+            } else {
+                error_text
+            };
+
+            return Err(error_message);
+        }
+
+        let credits_response: CreditsResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse credits response: {}", e))?;
+
+        Ok(credits_response.data)
     }
 
     // ========================================================================

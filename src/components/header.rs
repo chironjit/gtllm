@@ -1,5 +1,6 @@
-use crate::utils::Theme;
+use crate::utils::{Theme, OpenRouterClient, CreditsData};
 use dioxus::prelude::*;
+use std::sync::Arc;
 
 #[component]
 pub fn Header(
@@ -7,10 +8,46 @@ pub fn Header(
     on_toggle_mode: EventHandler<()>,
     on_theme_change: EventHandler<Theme>,
     on_settings: EventHandler<()>,
+    client: ReadSignal<Option<Arc<OpenRouterClient>>>,
 ) -> Element {
     let theme_val = *theme.read();
     let is_dark = theme_val.is_dark();
     let mut dropdown_open = use_signal(|| false);
+    let mut credits_dropdown_open = use_signal(|| false);
+    let mut credits = use_signal(|| None::<CreditsData>);
+    let mut is_loading_credits = use_signal(|| false);
+
+    // Fetch credits on mount if client is available
+    let _ = use_resource(move || async move {
+        if let Some(client_ref) = client().clone() {
+            match client_ref.fetch_credits().await {
+                Ok(data) => {
+                    credits.set(Some(data));
+                }
+                Err(e) => {
+                    eprintln!("Failed to fetch credits: {}", e);
+                }
+            }
+        }
+    });
+
+    // Handler for refreshing credits
+    let refresh_credits = move |_| {
+        if let Some(client_ref) = client().clone() {
+            is_loading_credits.set(true);
+            spawn(async move {
+                match client_ref.fetch_credits().await {
+                    Ok(data) => {
+                        credits.set(Some(data));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to refresh credits: {}", e);
+                    }
+                }
+                is_loading_credits.set(false);
+            });
+        }
+    };
 
     let available_themes = if is_dark {
         Theme::dark_themes()
@@ -45,6 +82,103 @@ pub fn Header(
                     // Right side - Controls
                     div {
                         class: "flex items-center gap-3",
+
+                        // Credits dropdown (if client is available)
+                        if client().is_some() {
+                            div {
+                                class: "relative",
+
+                                // Credits button
+                                button {
+                                    onclick: move |_| credits_dropdown_open.set(!credits_dropdown_open()),
+                                    class: "px-3 py-1.5 rounded-lg bg-[var(--color-base-300)] text-[var(--color-base-content)] text-sm font-medium border border-[var(--color-base-300)] hover:bg-[var(--color-base-300)]/80 focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] transition-all cursor-pointer flex items-center gap-2",
+
+                                    if let Some(credits_data) = credits() {
+                                        "{credits_data.remaining_formatted()}"
+                                    } else {
+                                        "Loading..."
+                                    }
+
+                                    span {
+                                        class: "text-[10px] opacity-50",
+                                        if *credits_dropdown_open.read() { "▲" } else { "▼" }
+                                    }
+                                }
+
+                                // Credits dropdown menu
+                                if *credits_dropdown_open.read() {
+                                    div {
+                                        class: "absolute right-0 mt-2 w-56 bg-[var(--color-base-200)] border border-[var(--color-base-300)] rounded-lg shadow-lg z-50 overflow-hidden",
+
+                                        // Credits info display
+                                        if let Some(credits_data) = credits() {
+                                            div {
+                                                class: "p-3 space-y-2 border-b border-[var(--color-base-300)]",
+
+                                                div {
+                                                    class: "flex justify-between text-xs",
+                                                    span {
+                                                        class: "text-[var(--color-base-content)]/70",
+                                                        "Total Credits:"
+                                                    }
+                                                    span {
+                                                        class: "font-medium text-[var(--color-base-content)]",
+                                                        "${credits_data.total_credits:.2}"
+                                                    }
+                                                }
+
+                                                div {
+                                                    class: "flex justify-between text-xs",
+                                                    span {
+                                                        class: "text-[var(--color-base-content)]/70",
+                                                        "Total Usage:"
+                                                    }
+                                                    span {
+                                                        class: "font-medium text-[var(--color-base-content)]",
+                                                        "${credits_data.total_usage:.2}"
+                                                    }
+                                                }
+
+                                                div {
+                                                    class: "flex justify-between text-xs pt-1 border-t border-[var(--color-base-300)]/50",
+                                                    span {
+                                                        class: "text-[var(--color-base-content)]",
+                                                        "Remaining:"
+                                                    }
+                                                    span {
+                                                        class: "font-bold text-[var(--color-primary)]",
+                                                        "{credits_data.remaining_formatted()}"
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Refresh button
+                                        button {
+                                            onclick: refresh_credits,
+                                            class: "w-full px-3 py-2 text-left text-sm hover:bg-[var(--color-base-300)] transition-colors flex items-center gap-2",
+                                            disabled: *is_loading_credits.read(),
+
+                                            img {
+                                                src: asset!("/assets/refresh.svg"),
+                                                class: "w-4 h-4",
+                                                class: if *is_loading_credits.read() { "animate-spin" } else { "" },
+                                                alt: "Refresh"
+                                            }
+
+                                            span {
+                                                class: "text-[var(--color-base-content)]",
+                                                if *is_loading_credits.read() {
+                                                    "Refreshing..."
+                                                } else {
+                                                    "Refresh Credits"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // Theme dropdown (custom)
                         div {
