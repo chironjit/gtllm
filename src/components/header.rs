@@ -16,17 +16,25 @@ pub fn Header(
     let mut credits_dropdown_open = use_signal(|| false);
     let mut credits = use_signal(|| None::<CreditsData>);
     let mut is_loading_credits = use_signal(|| false);
+    let mut has_fetched_credits = use_signal(|| false);
 
-    // Fetch credits on mount if client is available
-    let _ = use_resource(move || async move {
-        if let Some(client_ref) = client().clone() {
-            match client_ref.fetch_credits().await {
-                Ok(data) => {
-                    credits.set(Some(data));
-                }
-                Err(e) => {
-                    eprintln!("Failed to fetch credits: {}", e);
-                }
+    // Fetch credits when dropdown opens for the first time
+    use_effect(move || {
+        if *credits_dropdown_open.read() && !*has_fetched_credits.read() {
+            if let Some(client_ref) = client().clone() {
+                has_fetched_credits.set(true);
+                is_loading_credits.set(true);
+                spawn(async move {
+                    match client_ref.fetch_credits().await {
+                        Ok(data) => {
+                            credits.set(Some(data));
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to fetch credits: {}", e);
+                        }
+                    }
+                    is_loading_credits.set(false);
+                });
             }
         }
     });
