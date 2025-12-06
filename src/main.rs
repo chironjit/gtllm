@@ -381,9 +381,8 @@ fn App() -> Element {
                                     ChatMode::Collaborative => rsx! {
                                         Collaborative {
                                             theme,
-                                            messages,
+                                            client: openrouter_client.read().clone(),
                                             input_settings,
-                                            on_send: move |text| send_arena_message(text, ChatMode::Collaborative),
                                         }
                                     },
                                     ChatMode::Competitive => rsx! {

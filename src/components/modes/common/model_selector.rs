@@ -141,8 +141,12 @@ pub fn ModelSelector(props: ModelSelectorProps) -> Element {
                         div {
                             class: "text-center",
                             div {
-                                class: "text-4xl mb-4",
-                                "⏳"
+                                class: "flex justify-center mb-4",
+                                img {
+                                    src: asset!("/assets/loading.svg"),
+                                    class: "w-16 h-16 animate-spin",
+                                    alt: "Loading",
+                                }
                             }
                             p {
                                 class: "text-[var(--color-base-content)]/70",
@@ -156,8 +160,12 @@ pub fn ModelSelector(props: ModelSelectorProps) -> Element {
                         div {
                             class: "text-center max-w-md",
                             div {
-                                class: "text-4xl mb-4",
-                                "⚠️"
+                                class: "flex justify-center mb-4",
+                                img {
+                                    src: asset!("/assets/alert.svg"),
+                                    class: "w-16 h-16",
+                                    alt: "Error",
+                                }
                             }
                             p {
                                 class: "text-red-500 mb-2",
