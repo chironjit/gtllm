@@ -1,15 +1,25 @@
 mod chat;
 mod input;
 mod modal;
+mod model_response_card;
 mod model_selector;
+mod phase_indicator;
 mod prompt_card;
 mod prompt_editor;
 mod selection;
+mod streaming_indicator;
+mod vote_display;
+mod vote_tally;
 
 pub use chat::ChatDisplay;
 pub use input::ChatInput;
 pub use modal::Modal;
+pub use model_response_card::ModelResponseCard;
 pub use model_selector::ModelSelector;
+pub use phase_indicator::PhaseIndicator;
 pub use prompt_card::PromptCard;
 pub use prompt_editor::{PromptEditorModal, PromptType};
 pub use selection::LLMSelection;
+pub use streaming_indicator::StreamingIndicator;
+pub use vote_display::VoteDisplay;
+pub use vote_tally::{VoteTally, VoteTallyProps};

@@ -388,17 +388,15 @@ fn App() -> Element {
                                     ChatMode::Competitive => rsx! {
                                         Competitive {
                                             theme,
-                                            messages,
+                                            client: openrouter_client.read().clone(),
                                             input_settings,
-                                            on_send: move |text| send_arena_message(text, ChatMode::Competitive),
                                         }
                                     },
                                     ChatMode::LLMChoice => rsx! {
                                         Choice {
                                             theme,
-                                            messages,
+                                            client: openrouter_client.read().clone(),
                                             input_settings,
-                                            on_send: move |text| send_arena_message(text, ChatMode::LLMChoice),
                                         }
                                     },
                                 }

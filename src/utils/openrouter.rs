@@ -214,6 +214,12 @@ pub struct OpenRouterClient {
     api_key: Arc<String>,
 }
 
+impl PartialEq for OpenRouterClient {
+    fn eq(&self, other: &Self) -> bool {
+        self.api_key == other.api_key
+    }
+}
+
 impl OpenRouterClient {
     pub fn new(api_key: String) -> Self {
         let client = Client::builder()

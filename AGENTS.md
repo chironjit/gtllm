@@ -22,35 +22,12 @@
 ### Project Structure
 ```
 gtllm/
-├── src
-│   ├── main.rs
-│   ├── components
-│   │   ├── mod.rs                  
-│   │   ├── header.rs                   # Header component
-│   │   ├── sidebar.rs                  # Sidebar component
-│   │   └── modes                       # Main section - mainly chat modes but also includes settings page
-│   │       ├── mod.rs             
-│   │       ├── collaborative.rs
-│   │       ├── standard.rs
-│   │       ├── competitive.rs
-│   │       ├── choice.rs
-│   │       ├── new_chat.rs
-│   │       ├── pvp.rs
-│   │       ├── settings.rs
-│   │       └── common                  # Common components used by the modes
-│   │           ├── mod.rs
-│   │           ├── input.rs
-│   │           ├── model_selector.rs
-│   │           ├── chat.rs
-│   │           └── selection.rs
-│   └── utils
-│       ├── mod.rs
-│       ├── openrouter.rs               # OpenRouter API client
-│       ├── settings.rs                 # Settings persistence
-│       ├── theme.rs                    # Theme management
-│       ├── types.rs                    # Type definitions
-│       └── formatting.rs               # Output formatting
-├── guides                              # Guides to help with code generation
+├── AGENTS.md
+├── assets
+├── Cargo.lock
+├── Cargo.toml
+├── Dioxus.toml
+├── guides
 │   ├── dioxus
 │   │   └── DIOXUS_COMPONENTS.md
 │   └── openrouter
@@ -58,12 +35,38 @@ gtllm/
 │       ├── EMBEDDINGS.md
 │       ├── OTHERS.md
 │       └── STREAMING.md
-├── AGENTS.md                           # Agent / LLM instructions
-├── assets                              # Assets incl icons, images & generated files
-├── Cargo.lock
-├── Cargo.toml
-├── Dioxus.toml                           
 ├── README.md
+├── src
+│   ├── components
+│   │   ├── header.rs
+│   │   ├── modes
+│   │   │   ├── choice.rs
+│   │   │   ├── collaborative.rs
+│   │   │   ├── common
+│   │   │   │   ├── chat.rs
+│   │   │   │   ├── input.rs
+│   │   │   │   ├── modal.rs
+│   │   │   │   ├── model_selector.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── prompt_card.rs
+│   │   │   │   ├── prompt_editor.rs
+│   │   │   │   └── selection.rs
+│   │   │   ├── competitive.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── new_chat.rs
+│   │   │   ├── pvp.rs
+│   │   │   ├── settings.rs
+│   │   │   └── standard.rs
+│   │   ├── mod.rs
+│   │   └── sidebar.rs
+│   ├── main.rs
+│   └── utils
+│       ├── formatting.rs
+│       ├── mod.rs
+│       ├── openrouter.rs
+│       ├── settings.rs
+│       ├── theme.rs
+│       └── types.rs
 └── tailwind.css
 ```
 
