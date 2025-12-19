@@ -18,9 +18,9 @@ pub fn Header(
     let mut is_loading_credits = use_signal(|| false);
     let mut has_fetched_credits = use_signal(|| false);
 
-    // Fetch credits when dropdown opens for the first time
+    // Fetch credits when client becomes available
     use_effect(move || {
-        if *credits_dropdown_open.read() && !*has_fetched_credits.read() {
+        if client().is_some() && !*has_fetched_credits.read() {
             if let Some(client_ref) = client().clone() {
                 has_fetched_credits.set(true);
                 is_loading_credits.set(true);
