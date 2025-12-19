@@ -1,9 +1,30 @@
-use super::common::ChatInput;
+use super::common::{ChatInput, Modal};
 use crate::utils::{ChatMessage, InputSettings, Model, OpenRouterClient, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Clone, Debug, PartialEq)]
+struct SystemPrompts {
+    bot: String,
+    moderator: String,
+}
+
+impl Default for SystemPrompts {
+    fn default() -> Self {
+        Self {
+            bot: "You are a competitive AI assistant in a debate. Provide the best possible answer to demonstrate your capabilities.".to_string(),
+            moderator: "You are an impartial judge evaluating responses from AI models. Be objective, fair, and thorough in your analysis.".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PromptEditTarget {
+    Bot,
+    Moderator,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct BotResponse {
@@ -62,6 +83,12 @@ pub fn PvP(props: PvPProps) -> Element {
     let mut is_streaming_moderator = use_signal(|| false);
     let mut current_bot_responses = use_signal(|| HashMap::<String, String>::new());
     let mut current_moderator_response = use_signal(|| String::new());
+    
+    // System prompts
+    let mut system_prompts = use_signal(SystemPrompts::default);
+    let mut prompt_editor_open = use_signal(|| false);
+    let mut editing_prompt_target = use_signal(|| PromptEditTarget::Bot);
+    let mut temp_prompt = use_signal(String::new);
 
     // Fetch models on component mount
     let _fetch = use_hook(|| {
@@ -115,6 +142,26 @@ pub fn PvP(props: PvPProps) -> Element {
             selection_step.set(2);
         }
     };
+    
+    // Prompt editor handlers
+    let mut open_prompt_editor = move |target: PromptEditTarget| {
+        editing_prompt_target.set(target);
+        let current_prompt = match target {
+            PromptEditTarget::Bot => system_prompts.read().bot.clone(),
+            PromptEditTarget::Moderator => system_prompts.read().moderator.clone(),
+        };
+        temp_prompt.set(current_prompt);
+        prompt_editor_open.set(true);
+    };
+    
+    let save_prompt = move |_| {
+        let mut prompts = system_prompts.write();
+        match *editing_prompt_target.read() {
+            PromptEditTarget::Bot => prompts.bot = temp_prompt(),
+            PromptEditTarget::Moderator => prompts.moderator = temp_prompt(),
+        }
+        prompt_editor_open.set(false);
+    };
 
     // Send message handler
     let send_message = move |text: String| {
@@ -129,6 +176,7 @@ pub fn PvP(props: PvPProps) -> Element {
         if let Some(client_arc) = &client_for_send {
             let client = client_arc.clone();
             let user_msg = text.clone();
+            let prompts = system_prompts.read().clone();
             let mut is_streaming_bots_clone = is_streaming_bots.clone();
             let mut is_streaming_moderator_clone = is_streaming_moderator.clone();
             let mut current_bot_responses_clone = current_bot_responses.clone();
@@ -155,8 +203,11 @@ pub fn PvP(props: PvPProps) -> Element {
                 is_streaming_bots_clone.set(true);
                 current_bot_responses_clone.write().clear();
 
-                // Send to both bots in parallel
-                let messages = vec![ChatMessage::user(user_msg.clone())];
+                // Send to both bots in parallel with system prompt
+                let messages = vec![
+                    ChatMessage::system(prompts.bot.clone()),
+                    ChatMessage::user(user_msg.clone())
+                ];
                 let bot_ids = vec![bot1_id.clone(), bot2_id.clone()];
 
                 match client.stream_chat_completion_multi(bot_ids.clone(), messages).await {
@@ -224,8 +275,7 @@ pub fn PvP(props: PvPProps) -> Element {
                                             current_moderator_response_clone.set(String::new());
 
                                             let moderator_prompt = format!(
-                                                "You are a moderator judging a debate between two AI models.\n\n\
-                                                User Question: {}\n\n\
+                                                "User Question: {}\n\n\
                                                 {} Response:\n{}\n\n\
                                                 {} Response:\n{}\n\n\
                                                 Please evaluate both responses and determine which one is better. \
@@ -234,7 +284,10 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 user_msg, bot1_id, bot1_final, bot2_id, bot2_final
                                             );
 
-                                            let moderator_messages = vec![ChatMessage::user(moderator_prompt)];
+                                            let moderator_messages = vec![
+                                                ChatMessage::system(prompts.moderator.clone()),
+                                                ChatMessage::user(moderator_prompt)
+                                            ];
 
                                             match client.stream_chat_completion(mod_id.clone(), moderator_messages).await {
                                                 Ok(mut stream) => {
@@ -603,6 +656,68 @@ pub fn PvP(props: PvPProps) -> Element {
                     }
                 }
             } else {
+                // System prompts header
+                div {
+                    class: "p-3 border-b border-[var(--color-base-300)] bg-[var(--color-base-100)]",
+                    div {
+                        class: "flex items-center justify-between mb-2",
+                        h3 {
+                            class: "text-sm font-semibold text-[var(--color-base-content)]",
+                            "System Prompts"
+                        }
+                        button {
+                            onclick: move |_| { selection_step.set(0); conversation_history.write().clear(); },
+                            class: "text-xs text-[var(--color-primary)] hover:underline",
+                            "Change Models"
+                        }
+                    }
+                    div {
+                        class: "grid grid-cols-1 md:grid-cols-2 gap-2",
+                        
+                        // Bot prompt
+                        div {
+                            class: "bg-[var(--color-base-200)] rounded p-2 border border-[var(--color-base-300)]",
+                            div {
+                                class: "flex items-center justify-between mb-1",
+                                span {
+                                    class: "text-xs font-semibold text-[var(--color-base-content)]",
+                                    "Bot Prompt"
+                                }
+                                button {
+                                    onclick: move |_| open_prompt_editor(PromptEditTarget::Bot),
+                                    class: "text-xs text-[var(--color-primary)] hover:underline",
+                                    "Edit"
+                                }
+                            }
+                            div {
+                                class: "text-xs text-[var(--color-base-content)]/70 truncate",
+                                "{system_prompts.read().bot}"
+                            }
+                        }
+                        
+                        // Moderator prompt
+                        div {
+                            class: "bg-[var(--color-base-200)] rounded p-2 border border-[var(--color-base-300)]",
+                            div {
+                                class: "flex items-center justify-between mb-1",
+                                span {
+                                    class: "text-xs font-semibold text-[var(--color-base-content)]",
+                                    "Moderator Prompt"
+                                }
+                                button {
+                                    onclick: move |_| open_prompt_editor(PromptEditTarget::Moderator),
+                                    class: "text-xs text-[var(--color-primary)] hover:underline",
+                                    "Edit"
+                                }
+                            }
+                            div {
+                                class: "text-xs text-[var(--color-base-content)]/70 truncate",
+                                "{system_prompts.read().moderator}"
+                            }
+                        }
+                    }
+                }
+                
                 // Chat interface
                 div {
                     class: "flex-1 overflow-y-auto p-4",
@@ -800,6 +915,103 @@ pub fn PvP(props: PvPProps) -> Element {
                     theme,
                     input_settings,
                     on_send: send_message,
+                }
+            }
+            
+            // System Prompt Editor Modal
+            Modal {
+                theme,
+                open: prompt_editor_open,
+                on_close: move |_| {
+                    prompt_editor_open.set(false);
+                },
+                
+                div {
+                    class: "p-6",
+                    
+                    // Header
+                    div {
+                        class: "flex items-start justify-between mb-4",
+                        div {
+                            h2 {
+                                class: "text-xl font-bold text-[var(--color-base-content)]",
+                                {
+                                    let prompt_name = match *editing_prompt_target.read() {
+                                        PromptEditTarget::Bot => "Bot",
+                                        PromptEditTarget::Moderator => "Moderator",
+                                    };
+                                    format!("Edit {} System Prompt", prompt_name)
+                                }
+                            }
+                            p {
+                                class: "text-sm text-[var(--color-base-content)]/70 mt-1",
+                                {
+                                    match *editing_prompt_target.read() {
+                                        PromptEditTarget::Bot => "Sets the behavior for competing bots",
+                                        PromptEditTarget::Moderator => "Sets the behavior for the moderator judge",
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            class: "text-2xl text-[var(--color-base-content)]/70 hover:text-[var(--color-base-content)] transition-colors",
+                            onclick: move |_| {
+                                prompt_editor_open.set(false);
+                            },
+                            "×"
+                        }
+                    }
+                    
+                    // Prompt editor textarea
+                    div {
+                        class: "mb-4",
+                        textarea {
+                            value: "{temp_prompt}",
+                            oninput: move |evt| temp_prompt.set(evt.value()),
+                            rows: "10",
+                            class: "w-full p-3 border-2 rounded-lg font-mono text-sm bg-[var(--color-base-100)] text-[var(--color-base-content)] border-[var(--color-base-300)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent resize-y min-h-[200px]",
+                            placeholder: "Enter system prompt...",
+                            autofocus: true,
+                        }
+                    }
+                    
+                    // Character count
+                    div {
+                        class: "text-xs text-[var(--color-base-content)]/50 mb-4 text-right",
+                        "{temp_prompt.read().len()} characters"
+                    }
+                    
+                    // Action buttons
+                    div {
+                        class: "flex justify-between items-center gap-3",
+                        button {
+                            onclick: move |_| {
+                                let defaults = SystemPrompts::default();
+                                let default_prompt = match *editing_prompt_target.read() {
+                                    PromptEditTarget::Bot => defaults.bot,
+                                    PromptEditTarget::Moderator => defaults.moderator,
+                                };
+                                temp_prompt.set(default_prompt);
+                            },
+                            class: "px-4 py-2 text-sm rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] text-[var(--color-base-content)] hover:bg-[var(--color-base-300)] transition-colors",
+                            "Reset to Default"
+                        }
+                        div {
+                            class: "flex gap-2",
+                            button {
+                                onclick: move |_| {
+                                    prompt_editor_open.set(false);
+                                },
+                                class: "px-4 py-2 text-sm rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] text-[var(--color-base-content)] hover:bg-[var(--color-base-300)] transition-colors",
+                                "Cancel"
+                            }
+                            button {
+                                onclick: save_prompt,
+                                class: "px-4 py-2 text-sm rounded bg-[var(--color-primary)] text-[var(--color-primary-content)] hover:bg-[var(--color-primary)]/90 transition-colors font-medium",
+                                "Save Prompt"
+                            }
+                        }
+                    }
                 }
             }
         }

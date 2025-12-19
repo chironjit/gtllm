@@ -1,6 +1,7 @@
-use super::common::{ChatInput, ModelSelector};
+use super::common::{ChatInput, Modal, ModelSelector};
 use crate::utils::{ChatMessage, InputSettings, OpenRouterClient, StreamEvent, Theme};
 use dioxus::prelude::*;
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -9,6 +10,14 @@ struct ModelResponse {
     model_id: String,
     content: String,
     error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ConversationHistory {
+    // For single model: Vec<(user_msg, assistant_msg)>
+    single_model: Vec<(String, String)>,
+    // For multi-model: HashMap<model_id, Vec<(user_msg, assistant_msg)>>
+    multi_model: HashMap<String, Vec<(String, String)>>,
 }
 
 #[derive(Props, Clone)]
@@ -37,10 +46,38 @@ pub fn Standard(props: StandardProps) -> Element {
     let mut model_responses = use_signal(|| Vec::<Vec<ModelResponse>>::new());
     let mut current_streaming_responses = use_signal(|| HashMap::<String, String>::new());
     let mut is_streaming = use_signal(|| false);
+    
+    // System prompt state
+    let mut system_prompt = use_signal(|| "You are a helpful AI assistant.".to_string());
+    let mut system_prompt_editor_open = use_signal(|| false);
+    let mut temp_system_prompt = use_signal(|| String::new());
+    
+    // Conversation history (per model for multi-model mode)
+    let mut conversation_history = use_signal(|| ConversationHistory {
+        single_model: Vec::new(),
+        multi_model: HashMap::new(),
+    });
 
     // Handle model selection
     let on_models_selected = move |models: Vec<String>| {
-        selected_models.set(models);
+        selected_models.set(models.clone());
+        // Initialize conversation history for each model
+        let mut history = conversation_history.write();
+        history.multi_model.clear();
+        for model_id in &models {
+            history.multi_model.insert(model_id.clone(), Vec::new());
+        }
+    };
+    
+    // System prompt editor handlers
+    let open_system_prompt_editor = move |_| {
+        temp_system_prompt.set(system_prompt());
+        system_prompt_editor_open.set(true);
+    };
+    
+    let save_system_prompt = move |_| {
+        system_prompt.set(temp_system_prompt());
+        system_prompt_editor_open.set(false);
     };
 
     // Handle sending a message
@@ -60,91 +97,141 @@ pub fn Standard(props: StandardProps) -> Element {
         // Start streaming from all selected models
         if let Some(client_arc) = &client_for_send {
             let client = client_arc.clone();
-            let messages = vec![ChatMessage::user(text)];
+            let is_single_model = models.len() == 1;
+            let sys_prompt = system_prompt();
             let mut is_streaming_clone = is_streaming.clone();
             let mut current_streaming_responses_clone = current_streaming_responses.clone();
             let mut model_responses_clone = model_responses.clone();
+            let mut conversation_history_clone = conversation_history.clone();
 
             spawn(async move {
                 is_streaming_clone.set(true);
                 current_streaming_responses_clone.write().clear();
 
-                match client.stream_chat_completion_multi(models.clone(), messages).await {
-                    Ok(mut rx) => {
-                        let mut done_models = std::collections::HashSet::new();
-
-                        while let Some(event) = rx.recv().await {
-                            let model_id = event.model_id.clone();
-
-                            match event.event {
-                                StreamEvent::Content(content) => {
-                                    let mut responses = current_streaming_responses_clone.write();
-                                    responses
-                                        .entry(model_id.clone())
-                                        .and_modify(|s| s.push_str(&content))
-                                        .or_insert(content);
-                                }
-                                StreamEvent::Done => {
-                                    done_models.insert(model_id);
-
-                                    // Check if all models are done
-                                    if done_models.len() >= models.len() {
-                                        // All models done, finalize responses
-                                        let final_responses: Vec<ModelResponse> = {
-                                            let responses = current_streaming_responses_clone.read();
-                                            models
-                                                .iter()
-                                                .map(|mid| {
-                                                    let content = responses.get(mid).cloned().unwrap_or_default();
-                                                    // Check if content is an error message
-                                                    let (actual_content, error) = if content.starts_with("Error: ") {
-                                                        (String::new(), Some(content.strip_prefix("Error: ").unwrap_or(&content).to_string()))
-                                                    } else {
-                                                        (content, None)
-                                                    };
-
-                                                    ModelResponse {
-                                                        model_id: mid.clone(),
-                                                        content: actual_content,
-                                                        error_message: error,
-                                                    }
-                                                })
-                                                .collect()
-                                        };
-
-                                        model_responses_clone.write().push(final_responses);
-                                        current_streaming_responses_clone.write().clear();
-                                        is_streaming_clone.set(false);
+                // For single model, use its history directly
+                // For multiple models, we need to stream each separately with their own history
+                // Since we can't use stream_chat_completion_multi with different messages per model,
+                // we'll stream each model individually and aggregate results
+                
+                let mut final_results = HashMap::new();
+                
+                if is_single_model {
+                    // Single model with shared history
+                    let history = conversation_history_clone.read();
+                    let mut messages = vec![ChatMessage::system(sys_prompt.clone())];
+                    for (user_msg, assistant_msg) in &history.single_model {
+                        messages.push(ChatMessage::user(user_msg.clone()));
+                        messages.push(ChatMessage::assistant(assistant_msg.clone()));
+                    }
+                    messages.push(ChatMessage::user(text.clone()));
+                    drop(history);
+                    
+                    let model_id = models[0].clone();
+                    match client.stream_chat_completion(model_id.clone(), messages).await {
+                        Ok(mut stream) => {
+                            let mut content = String::new();
+                            while let Some(event) = stream.next().await {
+                                match event {
+                                    StreamEvent::Content(chunk) => {
+                                        content.push_str(&chunk);
+                                        let mut responses = current_streaming_responses_clone.write();
+                                        responses.insert(model_id.clone(), content.clone());
+                                    }
+                                    StreamEvent::Done => {
+                                        final_results.insert(model_id.clone(), (content.clone(), None));
+                                        break;
+                                    }
+                                    StreamEvent::Error(e) => {
+                                        final_results.insert(model_id.clone(), (String::new(), Some(e)));
                                         break;
                                     }
                                 }
-                                StreamEvent::Error(e) => {
-                                    let mut responses = current_streaming_responses_clone.write();
-                                    responses.insert(model_id.clone(), format!("Error: {}", e));
-                                    done_models.insert(model_id);
+                            }
+                        }
+                        Err(e) => {
+                            final_results.insert(model_id, (String::new(), Some(e)));
+                        }
+                    }
+                } else {
+                    // Multiple models, each with separate history
+                    for model_id in &models {
+                        let history = conversation_history_clone.read();
+                        let mut messages = vec![ChatMessage::system(sys_prompt.clone())];
+                        if let Some(model_history) = history.multi_model.get(model_id) {
+                            for (user_msg, assistant_msg) in model_history {
+                                messages.push(ChatMessage::user(user_msg.clone()));
+                                messages.push(ChatMessage::assistant(assistant_msg.clone()));
+                            }
+                        }
+                        messages.push(ChatMessage::user(text.clone()));
+                        drop(history);
+                        
+                        match client.stream_chat_completion(model_id.clone(), messages).await {
+                            Ok(mut stream) => {
+                                let mut content = String::new();
+                                while let Some(event) = stream.next().await {
+                                    match event {
+                                        StreamEvent::Content(chunk) => {
+                                            content.push_str(&chunk);
+                                            let mut responses = current_streaming_responses_clone.write();
+                                            responses.insert(model_id.clone(), content.clone());
+                                        }
+                                        StreamEvent::Done => {
+                                            final_results.insert(model_id.clone(), (content.clone(), None));
+                                            break;
+                                        }
+                                        StreamEvent::Error(e) => {
+                                            final_results.insert(model_id.clone(), (String::new(), Some(e)));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                final_results.insert(model_id.clone(), (String::new(), Some(e)));
+                            }
+                        }
+                    }
+                }
+                
+                // Build final responses
+                let mut final_responses: Vec<ModelResponse> = models
+                    .iter()
+                    .map(|model_id| {
+                        let (content, error) = final_results.get(model_id)
+                            .cloned()
+                            .unwrap_or_else(|| (String::new(), Some("No response received".to_string())));
+                        ModelResponse {
+                            model_id: model_id.clone(),
+                            content,
+                            error_message: error,
+                        }
+                    })
+                    .collect();
+                
+                // Update conversation history
+                {
+                    let mut history = conversation_history_clone.write();
+                    if is_single_model {
+                        if let Some(response) = final_responses.first() {
+                            if response.error_message.is_none() {
+                                history.single_model.push((text.clone(), response.content.clone()));
+                            }
+                        }
+                    } else {
+                        for response in &final_responses {
+                            if response.error_message.is_none() {
+                                if let Some(model_history) = history.multi_model.get_mut(&response.model_id) {
+                                    model_history.push((text.clone(), response.content.clone()));
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        is_streaming_clone.set(false);
-                        // Store error for all models
-                        let mut responses = current_streaming_responses_clone.write();
-                        for model_id in &models {
-                            responses.insert(model_id.clone(), format!("Error: {}", e));
-                        }
-                        // Finalize with error responses
-                        let final_responses: Vec<ModelResponse> = models
-                            .iter()
-                            .map(|mid| ModelResponse {
-                                model_id: mid.clone(),
-                                content: String::new(),
-                                error_message: Some(e.clone()),
-                            })
-                            .collect();
-                        model_responses_clone.write().push(final_responses);
-                    }
                 }
+                
+                model_responses_clone.write().push(final_responses);
+                current_streaming_responses_clone.write().clear();
+                is_streaming_clone.set(false);
             });
         }
     };
@@ -174,6 +261,35 @@ pub fn Standard(props: StandardProps) -> Element {
                     }
                 }
             } else {
+                // System prompt header
+                div {
+                    class: "p-3 border-b border-[var(--color-base-300)] bg-[var(--color-base-100)]",
+                    div {
+                        class: "flex items-center justify-between",
+                        h3 {
+                            class: "text-sm font-semibold text-[var(--color-base-content)]",
+                            "System Prompt"
+                        }
+                        div {
+                            class: "flex items-center gap-2",
+                            button {
+                                onclick: open_system_prompt_editor,
+                                class: "text-xs text-[var(--color-primary)] hover:underline",
+                                "Edit"
+                            }
+                            button {
+                                onclick: move |_| selected_models.set(Vec::new()),
+                                class: "text-xs text-[var(--color-primary)] hover:underline",
+                                "Change Models"
+                            }
+                        }
+                    }
+                    div {
+                        class: "text-xs text-[var(--color-base-content)]/70 mt-1 truncate",
+                        "{system_prompt}"
+                    }
+                }
+                
                 // Chat interface
                 div {
                     class: "flex-1 overflow-y-auto p-4",
@@ -370,6 +486,90 @@ pub fn Standard(props: StandardProps) -> Element {
                     theme,
                     input_settings,
                     on_send: send_message,
+                }
+            }
+            
+            // System Prompt Editor Modal
+            Modal {
+                theme,
+                open: system_prompt_editor_open,
+                on_close: move |_| {
+                    temp_system_prompt.set(system_prompt());
+                    system_prompt_editor_open.set(false);
+                },
+                
+                div {
+                    class: "p-6",
+                    
+                    // Header
+                    div {
+                        class: "flex items-start justify-between mb-4",
+                        div {
+                            h2 {
+                                class: "text-xl font-bold text-[var(--color-base-content)]",
+                                "Edit System Prompt"
+                            }
+                            p {
+                                class: "text-sm text-[var(--color-base-content)]/70 mt-1",
+                                "The system prompt sets the behavior and personality of the AI assistant."
+                            }
+                        }
+                        button {
+                            class: "text-2xl text-[var(--color-base-content)]/70 hover:text-[var(--color-base-content)] transition-colors",
+                            onclick: move |_| {
+                                temp_system_prompt.set(system_prompt());
+                                system_prompt_editor_open.set(false);
+                            },
+                            "×"
+                        }
+                    }
+                    
+                    // Prompt editor textarea
+                    div {
+                        class: "mb-4",
+                        textarea {
+                            value: "{temp_system_prompt}",
+                            oninput: move |evt| temp_system_prompt.set(evt.value()),
+                            rows: "10",
+                            class: "w-full p-3 border-2 rounded-lg font-mono text-sm bg-[var(--color-base-100)] text-[var(--color-base-content)] border-[var(--color-base-300)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent resize-y min-h-[200px]",
+                            placeholder: "Enter system prompt...",
+                            autofocus: true,
+                        }
+                    }
+                    
+                    // Character count
+                    div {
+                        class: "text-xs text-[var(--color-base-content)]/50 mb-4 text-right",
+                        "{temp_system_prompt.read().len()} characters"
+                    }
+                    
+                    // Action buttons
+                    div {
+                        class: "flex justify-between items-center gap-3",
+                        button {
+                            onclick: move |_| {
+                                temp_system_prompt.set("You are a helpful AI assistant.".to_string());
+                            },
+                            class: "px-4 py-2 text-sm rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] text-[var(--color-base-content)] hover:bg-[var(--color-base-300)] transition-colors",
+                            "Reset to Default"
+                        }
+                        div {
+                            class: "flex gap-2",
+                            button {
+                                onclick: move |_| {
+                                    temp_system_prompt.set(system_prompt());
+                                    system_prompt_editor_open.set(false);
+                                },
+                                class: "px-4 py-2 text-sm rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] text-[var(--color-base-content)] hover:bg-[var(--color-base-300)] transition-colors",
+                                "Cancel"
+                            }
+                            button {
+                                onclick: save_system_prompt,
+                                class: "px-4 py-2 text-sm rounded bg-[var(--color-primary)] text-[var(--color-primary-content)] hover:bg-[var(--color-primary)]/90 transition-colors font-medium",
+                                "Save Prompt"
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -375,6 +375,9 @@
   .min-h-\[3rem\] {
     min-height: 3rem;
   }
+  .min-h-\[200px\] {
+    min-height: 200px;
+  }
   .min-h-\[300px\] {
     min-height: 300px;
   }

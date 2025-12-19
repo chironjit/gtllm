@@ -1,9 +1,38 @@
-use super::common::{ChatInput, ModelResponseCard, PhaseIndicator, PromptCard, VoteDisplay, VoteTally, VoteTallyProps};
+use super::common::{ChatInput, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, VoteDisplay, VoteTally, VoteTallyProps};
 use crate::utils::{ChatMessage, InputSettings, Model, OpenRouterClient, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CompetitivePromptType {
+    Proposal,
+    Voting,
+}
+
+impl CompetitivePromptType {
+    fn name(&self) -> &'static str {
+        match self {
+            CompetitivePromptType::Proposal => "Proposal",
+            CompetitivePromptType::Voting => "Voting",
+        }
+    }
+    
+    fn description(&self) -> &'static str {
+        match self {
+            CompetitivePromptType::Proposal => "Prompt sent to models to generate their proposals",
+            CompetitivePromptType::Voting => "Prompt sent to models to vote for the best proposal",
+        }
+    }
+    
+    fn variables(&self) -> &'static str {
+        match self {
+            CompetitivePromptType::Proposal => "{user_question}",
+            CompetitivePromptType::Voting => "{user_question}, {all_proposals}, {your_proposal}",
+        }
+    }
+}
 
 // ============================================================================
 // Data Structures
@@ -21,6 +50,22 @@ impl Default for PromptTemplates {
             proposal: "You are participating in a competitive problem-solving challenge with other AI models. Provide your best solution to this question:\n\n{user_question}".to_string(),
 
             voting: "You are voting on the best solution among the proposals below. You CANNOT vote for your own response.\n\nUser Question: {user_question}\n\nAll Proposals:\n{all_proposals}\n\nYour Proposal:\n{your_proposal}\n\nVote for the BEST proposal by responding with ONLY the model ID of your choice (e.g., 'anthropic/claude-3.5-sonnet'). Do not vote for yourself.".to_string(),
+        }
+    }
+}
+
+impl PromptTemplates {
+    fn get(&self, prompt_type: CompetitivePromptType) -> String {
+        match prompt_type {
+            CompetitivePromptType::Proposal => self.proposal.clone(),
+            CompetitivePromptType::Voting => self.voting.clone(),
+        }
+    }
+    
+    fn set(&mut self, prompt_type: CompetitivePromptType, value: String) {
+        match prompt_type {
+            CompetitivePromptType::Proposal => self.proposal = value,
+            CompetitivePromptType::Voting => self.voting = value,
         }
     }
 }
@@ -182,12 +227,29 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
     let mut current_streaming_responses = use_signal(|| HashMap::<String, String>::new());
     let mut current_phase = use_signal(|| CompetitivePhase::Proposal);
     let mut prompt_templates = use_signal(PromptTemplates::default);
+    
+    // Prompt editor state
+    let mut prompt_editor_open = use_signal(|| false);
+    let mut editing_prompt_type = use_signal(|| CompetitivePromptType::Proposal);
+    let mut temp_prompt = use_signal(String::new);
 
     // Search state for model selection
     let mut search_query = use_signal(|| String::new());
     let mut available_models = use_signal(|| None::<Result<Vec<Model>, String>>);
 
     let client_for_send = client.clone();
+    
+    // Prompt editor handlers
+    let mut open_prompt_editor = move |ptype: CompetitivePromptType| {
+        editing_prompt_type.set(ptype);
+        temp_prompt.set(prompt_templates.read().get(ptype));
+        prompt_editor_open.set(true);
+    };
+    
+    let save_prompt = move |new_prompt: String| {
+        let mut templates = prompt_templates.write();
+        templates.set(*editing_prompt_type.read(), new_prompt);
+    };
 
     // Fetch models on mount
     use_hook(|| {
@@ -596,6 +658,47 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     }
                 }
             } else {
+                // Prompt Templates Section
+                div {
+                    class: "p-3 border-b border-[var(--color-base-300)] bg-[var(--color-base-100)]",
+                    
+                    div {
+                        class: "flex items-center justify-between mb-2",
+                        h3 {
+                            class: "text-sm font-semibold text-[var(--color-base-content)]",
+                            "Prompt Templates (Click to customize)"
+                        }
+                        button {
+                            onclick: move |_| {
+                                selection_step.set(0);
+                                conversation_history.write().clear();
+                            },
+                            class: "text-xs text-[var(--color-primary)] hover:underline",
+                            "Change Models"
+                        }
+                    }
+                    
+                    div {
+                        class: "grid grid-cols-1 md:grid-cols-2 gap-2",
+                        
+                        PromptCard {
+                            theme,
+                            title: "Proposal".to_string(),
+                            phase_number: 1,
+                            prompt: prompt_templates.read().proposal.clone(),
+                            on_edit: move |_| open_prompt_editor(CompetitivePromptType::Proposal),
+                        }
+                        
+                        PromptCard {
+                            theme,
+                            title: "Voting".to_string(),
+                            phase_number: 2,
+                            prompt: prompt_templates.read().voting.clone(),
+                            on_edit: move |_| open_prompt_editor(CompetitivePromptType::Voting),
+                        }
+                    }
+                }
+                
                 // Chat interface
                 div {
                     class: "flex-1 overflow-y-auto p-4",
@@ -779,6 +882,19 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     input_settings,
                     on_send: send_message,
                 }
+            }
+            
+            // Prompt Editor Modal
+            PromptEditorModal {
+                theme,
+                open: prompt_editor_open,
+                prompt_type: match *editing_prompt_type.read() {
+                    CompetitivePromptType::Proposal => super::common::PromptType::Initial,
+                    CompetitivePromptType::Voting => super::common::PromptType::Review,
+                },
+                current_prompt: temp_prompt(),
+                default_prompt: PromptTemplates::default().get(*editing_prompt_type.read()),
+                on_save: save_prompt,
             }
         }
     }

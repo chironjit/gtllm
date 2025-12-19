@@ -1,9 +1,33 @@
-use super::common::{ChatInput, ModelSelector, ModelResponseCard};
+use super::common::{ChatInput, Modal, ModelSelector, ModelResponseCard};
 use crate::utils::{ChatMessage, InputSettings, OpenRouterClient, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Clone, Debug, PartialEq)]
+struct SystemPrompts {
+    decision: String,
+    collaborative: String,
+    competitive: String,
+}
+
+impl Default for SystemPrompts {
+    fn default() -> Self {
+        Self {
+            decision: "You are part of a team of AI models deciding on the best approach to answer a question. Consider whether collaboration or competition would yield better results.".to_string(),
+            collaborative: "You are part of a collaborative AI team working together to provide the best answer.".to_string(),
+            competitive: "You are in a competitive challenge. Provide your best solution and vote fairly for the best proposal.".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PromptEditTarget {
+    Decision,
+    Collaborative,
+    Competitive,
+}
 
 // ============================================================================
 // Data Structures
@@ -275,11 +299,40 @@ pub fn Choice(props: ChoiceProps) -> Element {
     let mut is_processing = use_signal(|| false);
     let mut current_streaming_responses = use_signal(|| HashMap::<String, String>::new());
     let mut current_phase = use_signal(|| ChoicePhase::Decision);
+    
+    // System prompts
+    let mut system_prompts = use_signal(SystemPrompts::default);
+    let mut prompt_editor_open = use_signal(|| false);
+    let mut editing_prompt_target = use_signal(|| PromptEditTarget::Decision);
+    let mut temp_prompt = use_signal(String::new);
 
     // Handle model selection
     let on_models_selected = move |models: Vec<String>| {
         selected_models.set(models);
         selection_step.set(1);
+    };
+    
+    // Prompt editor handlers
+    let mut open_prompt_editor = move |target: PromptEditTarget| {
+        editing_prompt_target.set(target);
+        let prompts = system_prompts.read();
+        let current_prompt = match target {
+            PromptEditTarget::Decision => prompts.decision.clone(),
+            PromptEditTarget::Collaborative => prompts.collaborative.clone(),
+            PromptEditTarget::Competitive => prompts.competitive.clone(),
+        };
+        temp_prompt.set(current_prompt);
+        prompt_editor_open.set(true);
+    };
+    
+    let save_prompt = move |_| {
+        let mut prompts = system_prompts.write();
+        match *editing_prompt_target.read() {
+            PromptEditTarget::Decision => prompts.decision = temp_prompt(),
+            PromptEditTarget::Collaborative => prompts.collaborative = temp_prompt(),
+            PromptEditTarget::Competitive => prompts.competitive = temp_prompt(),
+        }
+        prompt_editor_open.set(false);
     };
 
     // Send message handler
@@ -296,20 +349,24 @@ pub fn Choice(props: ChoiceProps) -> Element {
         if let Some(client_arc) = &client_for_send {
             let client = client_arc.clone();
             let user_msg = text.clone();
+            let prompts = system_prompts.read().clone();
             let mut is_processing_clone = is_processing.clone();
             let mut current_phase_clone = current_phase.clone();
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
 
             // Initialize new round
-            conversation_history_clone.write().push(ChoiceRound {
-                user_question: user_msg.clone(),
-                decisions: vec![],
-                chosen_strategy: None,
-                collaborative_result: None,
-                competitive_result: None,
-                current_phase: ChoicePhase::Decision,
-            });
+            {
+                let mut history = conversation_history_clone.write();
+                history.push(ChoiceRound {
+                    user_question: user_msg.clone(),
+                    decisions: vec![],
+                    chosen_strategy: None,
+                    collaborative_result: None,
+                    competitive_result: None,
+                    current_phase: ChoicePhase::Decision,
+                });
+            } // Drop the write borrow before spawning
 
             spawn(async move {
                 is_processing_clone.set(true);
@@ -320,18 +377,20 @@ pub fn Choice(props: ChoiceProps) -> Element {
                 // PHASE 1: Strategy Decision
                 // ========================================================
 
-                let decision_prompt = format!(
-                    "You are part of a team of AI models that must decide how to approach answering a user's question.\n\n\
-                    User Question: {}\n\n\
-                    You have two options:\n\
-                    1. COLLABORATE: Work together to synthesize the best answer through discussion and consensus\n\
-                    2. COMPETE: Each model proposes a solution, then all models vote on the best one\n\n\
-                    Consider the nature of the question and decide which approach would yield better results.\n\n\
-                    Respond with your decision (COLLABORATE or COMPETE) and briefly explain your reasoning.",
-                    user_msg
-                );
+                                let decision_prompt = format!(
+                                    "User Question: {}\n\n\
+                                    You have two options:\n\
+                                    1. COLLABORATE: Work together to synthesize the best answer through discussion and consensus\n\
+                                    2. COMPETE: Each model proposes a solution, then all models vote on the best one\n\n\
+                                    Consider the nature of the question and decide which approach would yield better results.\n\n\
+                                    Respond with your decision (COLLABORATE or COMPETE) and briefly explain your reasoning.",
+                                    user_msg
+                                );
 
-                let messages = vec![ChatMessage::user(decision_prompt)];
+                                let messages = vec![
+                                    ChatMessage::system(prompts.decision.clone()),
+                                    ChatMessage::user(decision_prompt)
+                                ];
                 let mut decisions: Vec<ModelDecision> = Vec::new();
 
                 match client.stream_chat_completion_multi(models.clone(), messages).await {
@@ -416,6 +475,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     &client,
                                     &models,
                                     &user_msg,
+                                    &prompts.collaborative,
                                     current_streaming_clone,
                                     conversation_history_clone,
                                 ).await;
@@ -431,6 +491,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     &client,
                                     &models,
                                     &user_msg,
+                                    &prompts.competitive,
                                     current_streaming_clone,
                                     conversation_history_clone,
                                 ).await;
@@ -488,6 +549,94 @@ pub fn Choice(props: ChoiceProps) -> Element {
                     }
                 }
             } else {
+                // System Prompts Section
+                div {
+                    class: "p-3 border-b border-[var(--color-base-300)] bg-[var(--color-base-100)]",
+                    
+                    div {
+                        class: "flex items-center justify-between mb-2",
+                        h3 {
+                            class: "text-sm font-semibold text-[var(--color-base-content)]",
+                            "System Prompts"
+                        }
+                        button {
+                            onclick: move |_| {
+                                selection_step.set(0);
+                                conversation_history.write().clear();
+                            },
+                            class: "text-xs text-[var(--color-primary)] hover:underline",
+                            "Change Models"
+                        }
+                    }
+                    
+                    div {
+                        class: "grid grid-cols-1 md:grid-cols-3 gap-2",
+                        
+                        // Decision prompt
+                        div {
+                            class: "bg-[var(--color-base-200)] rounded p-2 border border-[var(--color-base-300)]",
+                            div {
+                                class: "flex items-center justify-between mb-1",
+                                span {
+                                    class: "text-xs font-semibold text-[var(--color-base-content)]",
+                                    "Decision Phase"
+                                }
+                                button {
+                                    onclick: move |_| open_prompt_editor(PromptEditTarget::Decision),
+                                    class: "text-xs text-[var(--color-primary)] hover:underline",
+                                    "Edit"
+                                }
+                            }
+                            div {
+                                class: "text-xs text-[var(--color-base-content)]/70 truncate",
+                                "{system_prompts.read().decision}"
+                            }
+                        }
+                        
+                        // Collaborative prompt
+                        div {
+                            class: "bg-[var(--color-base-200)] rounded p-2 border border-[var(--color-base-300)]",
+                            div {
+                                class: "flex items-center justify-between mb-1",
+                                span {
+                                    class: "text-xs font-semibold text-[var(--color-base-content)]",
+                                    "Collaborative"
+                                }
+                                button {
+                                    onclick: move |_| open_prompt_editor(PromptEditTarget::Collaborative),
+                                    class: "text-xs text-[var(--color-primary)] hover:underline",
+                                    "Edit"
+                                }
+                            }
+                            div {
+                                class: "text-xs text-[var(--color-base-content)]/70 truncate",
+                                "{system_prompts.read().collaborative}"
+                            }
+                        }
+                        
+                        // Competitive prompt
+                        div {
+                            class: "bg-[var(--color-base-200)] rounded p-2 border border-[var(--color-base-300)]",
+                            div {
+                                class: "flex items-center justify-between mb-1",
+                                span {
+                                    class: "text-xs font-semibold text-[var(--color-base-content)]",
+                                    "Competitive"
+                                }
+                                button {
+                                    onclick: move |_| open_prompt_editor(PromptEditTarget::Competitive),
+                                    class: "text-xs text-[var(--color-primary)] hover:underline",
+                                    "Edit"
+                                }
+                            }
+                            div {
+                                class: "text-xs text-[var(--color-base-content)]/70 truncate",
+                                "{system_prompts.read().competitive}"
+                            }
+                        }
+                    }
+                }
+                
                 // Chat Interface
                 div {
                     class: "flex-1 overflow-y-auto p-4",
@@ -851,6 +1000,106 @@ pub fn Choice(props: ChoiceProps) -> Element {
                     on_send: send_message,
                 }
             }
+            
+            // System Prompt Editor Modal
+            Modal {
+                theme,
+                open: prompt_editor_open,
+                on_close: move |_| {
+                    prompt_editor_open.set(false);
+                },
+                
+                div {
+                    class: "p-6",
+                    
+                    // Header
+                    div {
+                        class: "flex items-start justify-between mb-4",
+                        div {
+                            h2 {
+                                class: "text-xl font-bold text-[var(--color-base-content)]",
+                                {
+                                    let prompt_name = match *editing_prompt_target.read() {
+                                        PromptEditTarget::Decision => "Decision Phase",
+                                        PromptEditTarget::Collaborative => "Collaborative",
+                                        PromptEditTarget::Competitive => "Competitive",
+                                    };
+                                    format!("Edit {} System Prompt", prompt_name)
+                                }
+                            }
+                            p {
+                                class: "text-sm text-[var(--color-base-content)]/70 mt-1",
+                                {
+                                    match *editing_prompt_target.read() {
+                                        PromptEditTarget::Decision => "Sets behavior when LLMs decide on their strategy",
+                                        PromptEditTarget::Collaborative => "Sets behavior for collaborative execution",
+                                        PromptEditTarget::Competitive => "Sets behavior for competitive execution",
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            class: "text-2xl text-[var(--color-base-content)]/70 hover:text-[var(--color-base-content)] transition-colors",
+                            onclick: move |_| {
+                                prompt_editor_open.set(false);
+                            },
+                            "×"
+                        }
+                    }
+                    
+                    // Prompt editor textarea
+                    div {
+                        class: "mb-4",
+                        textarea {
+                            value: "{temp_prompt}",
+                            oninput: move |evt| temp_prompt.set(evt.value()),
+                            rows: "10",
+                            class: "w-full p-3 border-2 rounded-lg font-mono text-sm bg-[var(--color-base-100)] text-[var(--color-base-content)] border-[var(--color-base-300)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent resize-y min-h-[200px]",
+                            placeholder: "Enter system prompt...",
+                            autofocus: true,
+                        }
+                    }
+                    
+                    // Character count
+                    div {
+                        class: "text-xs text-[var(--color-base-content)]/50 mb-4 text-right",
+                        "{temp_prompt.read().len()} characters"
+                    }
+                    
+                    // Action buttons
+                    div {
+                        class: "flex justify-between items-center gap-3",
+                        button {
+                            onclick: move |_| {
+                                let defaults = SystemPrompts::default();
+                                let default_prompt = match *editing_prompt_target.read() {
+                                    PromptEditTarget::Decision => defaults.decision,
+                                    PromptEditTarget::Collaborative => defaults.collaborative,
+                                    PromptEditTarget::Competitive => defaults.competitive,
+                                };
+                                temp_prompt.set(default_prompt);
+                            },
+                            class: "px-4 py-2 text-sm rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] text-[var(--color-base-content)] hover:bg-[var(--color-base-300)] transition-colors",
+                            "Reset to Default"
+                        }
+                        div {
+                            class: "flex gap-2",
+                            button {
+                                onclick: move |_| {
+                                    prompt_editor_open.set(false);
+                                },
+                                class: "px-4 py-2 text-sm rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] text-[var(--color-base-content)] hover:bg-[var(--color-base-300)] transition-colors",
+                                "Cancel"
+                            }
+                            button {
+                                onclick: save_prompt,
+                                class: "px-4 py-2 text-sm rounded bg-[var(--color-primary)] text-[var(--color-primary-content)] hover:bg-[var(--color-primary)]/90 transition-colors font-medium",
+                                "Save Prompt"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -863,15 +1112,19 @@ async fn execute_collaborative(
     client: &Arc<OpenRouterClient>,
     models: &[String],
     user_msg: &str,
+    system_prompt: &str,
     mut current_streaming: Signal<HashMap<String, String>>,
     mut conversation_history: Signal<Vec<ChoiceRound>>,
 ) {
     // Phase 1: Initial Responses
     let initial_prompt = format!(
-        "You are part of a collaborative AI team working together to answer questions. Provide your best answer to this question:\n\n{}",
+        "Provide your best answer to this question:\n\n{}",
         user_msg
     );
-    let messages = vec![ChatMessage::user(initial_prompt)];
+    let messages = vec![
+        ChatMessage::system(system_prompt.to_string()),
+        ChatMessage::user(initial_prompt)
+    ];
 
     let mut phase1_results: HashMap<String, ModelResponse> = HashMap::new();
 
@@ -927,123 +1180,130 @@ async fn execute_collaborative(
 
     current_streaming.write().clear();
 
-    // Update round with Phase 1 results
-    if let Some(last_round) = conversation_history.write().last_mut() {
-        let phase1_responses: Vec<ModelResponse> = models
+    // Prepare Phase 1 responses (drop borrow quickly)
+    let phase1_responses: Vec<ModelResponse> = {
+        models
             .iter()
             .filter_map(|id| phase1_results.get(id).cloned())
-            .collect();
+            .collect()
+    };
 
-        // Phase 2: Cross-Review (simplified - just collect reviews)
-        let mut phase2_reviews = Vec::new();
-        let successful_phase1: Vec<_> = phase1_results
-            .values()
-            .filter(|r| r.error_message.is_none())
-            .collect();
+    // Phase 2: Cross-Review (simplified - just collect reviews)
+    let mut phase2_reviews = Vec::new();
+    let successful_phase1: Vec<_> = phase1_results
+        .values()
+        .filter(|r| r.error_message.is_none())
+        .collect();
 
-        if successful_phase1.len() >= 2 {
-            for model_id in models {
-                let other_responses: String = successful_phase1
-                    .iter()
-                    .filter(|r| &r.model_id != model_id)
-                    .map(|r| format!("{}: {}", r.model_id, r.content))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
+    if successful_phase1.len() >= 2 {
+        for model_id in models {
+            let other_responses: String = successful_phase1
+                .iter()
+                .filter(|r| &r.model_id != model_id)
+                .map(|r| format!("{}: {}", r.model_id, r.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
 
-                let review_prompt = format!(
-                    "Review the following responses from other AI models. Provide constructive feedback.\n\nUser Question: {}\n\nOther responses:\n{}\n\nProvide your analysis:",
-                    user_msg, other_responses
-                );
+            let review_prompt = format!(
+                "Review the following responses from other AI models. Provide constructive feedback.\n\nUser Question: {}\n\nOther responses:\n{}\n\nProvide your analysis:",
+                user_msg, other_responses
+            );
 
-                let review_messages = vec![ChatMessage::user(review_prompt)];
+            let review_messages = vec![
+                ChatMessage::system(system_prompt.to_string()),
+                ChatMessage::user(review_prompt)
+            ];
 
-                if let Ok(mut stream) = client.stream_chat_completion(model_id.clone(), review_messages).await {
-                    let mut review_content = String::new();
-                    while let Some(event) = stream.next().await {
-                        match event {
-                            StreamEvent::Content(content) => {
-                                review_content.push_str(&content);
-                            }
-                            StreamEvent::Done => {
-                                phase2_reviews.push(ModelResponse {
-                                    model_id: model_id.clone(),
-                                    content: review_content,
-                                    error_message: None,
-                                });
-                                break;
-                            }
-                            StreamEvent::Error(e) => {
-                                phase2_reviews.push(ModelResponse {
-                                    model_id: model_id.clone(),
-                                    content: String::new(),
-                                    error_message: Some(e),
-                                });
-                                break;
-                            }
+            if let Ok(mut stream) = client.stream_chat_completion(model_id.clone(), review_messages).await {
+                let mut review_content = String::new();
+                while let Some(event) = stream.next().await {
+                    match event {
+                        StreamEvent::Content(content) => {
+                            review_content.push_str(&content);
+                        }
+                        StreamEvent::Done => {
+                            phase2_reviews.push(ModelResponse {
+                                model_id: model_id.clone(),
+                                content: review_content,
+                                error_message: None,
+                            });
+                            break;
+                        }
+                        StreamEvent::Error(e) => {
+                            phase2_reviews.push(ModelResponse {
+                                model_id: model_id.clone(),
+                                content: String::new(),
+                                error_message: Some(e),
+                            });
+                            break;
                         }
                     }
                 }
             }
         }
+    }
 
-        // Phase 3: Consensus
-        let synthesizer_id = &models[0];
-        let initial_responses_text: String = successful_phase1
-            .iter()
-            .map(|r| format!("{}: {}", r.model_id, r.content))
-            .collect::<Vec<_>>()
-            .join("\n\n");
+    // Phase 3: Consensus
+    let synthesizer_id = &models[0];
+    let initial_responses_text: String = successful_phase1
+        .iter()
+        .map(|r| format!("{}: {}", r.model_id, r.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-        let reviews_text: String = phase2_reviews
-            .iter()
-            .filter(|r| r.error_message.is_none())
-            .map(|r| format!("{}: {}", r.model_id, r.content))
-            .collect::<Vec<_>>()
-            .join("\n\n");
+    let reviews_text: String = phase2_reviews
+        .iter()
+        .filter(|r| r.error_message.is_none())
+        .map(|r| format!("{}: {}", r.model_id, r.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-        let consensus_prompt = format!(
-            "Based on all the initial responses and reviews below, synthesize a final collaborative answer.\n\nUser Question: {}\n\nInitial Responses:\n{}\n\nReviews:\n{}\n\nSynthesize the best collaborative answer:",
-            user_msg, initial_responses_text, reviews_text
-        );
+    let consensus_prompt = format!(
+        "Based on all the initial responses and reviews below, synthesize a final collaborative answer.\n\nUser Question: {}\n\nInitial Responses:\n{}\n\nReviews:\n{}\n\nSynthesize the best collaborative answer:",
+        user_msg, initial_responses_text, reviews_text
+    );
 
-        let consensus_messages = vec![ChatMessage::user(consensus_prompt)];
-        let mut consensus_content = String::new();
+    let consensus_messages = vec![
+        ChatMessage::system(system_prompt.to_string()),
+        ChatMessage::user(consensus_prompt)
+    ];
+    let mut consensus_content = String::new();
+    let mut consensus_error: Option<String> = None;
 
-        if let Ok(mut stream) = client.stream_chat_completion(synthesizer_id.clone(), consensus_messages).await {
+    match client.stream_chat_completion(synthesizer_id.clone(), consensus_messages).await {
+        Ok(mut stream) => {
             while let Some(event) = stream.next().await {
                 match event {
                     StreamEvent::Content(content) => {
                         consensus_content.push_str(&content);
                     }
                     StreamEvent::Done => {
-                        last_round.collaborative_result = Some(CollaborativeRound {
-                            user_question: user_msg.to_string(),
-                            phase1_responses,
-                            phase2_reviews,
-                            phase3_consensus: Some(ModelResponse {
-                                model_id: synthesizer_id.clone(),
-                                content: consensus_content,
-                                error_message: None,
-                            }),
-                        });
                         break;
                     }
                     StreamEvent::Error(e) => {
-                        last_round.collaborative_result = Some(CollaborativeRound {
-                            user_question: user_msg.to_string(),
-                            phase1_responses,
-                            phase2_reviews,
-                            phase3_consensus: Some(ModelResponse {
-                                model_id: synthesizer_id.clone(),
-                                content: String::new(),
-                                error_message: Some(e),
-                            }),
-                        });
+                        consensus_error = Some(e);
                         break;
                     }
                 }
             }
         }
+        Err(e) => {
+            consensus_error = Some(e);
+        }
+    }
+
+    // Update round with all results (get fresh borrow)
+    if let Some(last_round) = conversation_history.write().last_mut() {
+        last_round.collaborative_result = Some(CollaborativeRound {
+            user_question: user_msg.to_string(),
+            phase1_responses,
+            phase2_reviews,
+            phase3_consensus: Some(ModelResponse {
+                model_id: synthesizer_id.clone(),
+                content: consensus_content,
+                error_message: consensus_error,
+            }),
+        });
     }
 }
 
@@ -1051,15 +1311,19 @@ async fn execute_competitive(
     client: &Arc<OpenRouterClient>,
     models: &[String],
     user_msg: &str,
+    system_prompt: &str,
     mut current_streaming: Signal<HashMap<String, String>>,
     mut conversation_history: Signal<Vec<ChoiceRound>>,
 ) {
     // Phase 1: Proposals
     let proposal_prompt = format!(
-        "You are participating in a competitive problem-solving challenge. Provide your best solution:\n\n{}",
+        "Provide your best solution:\n\n{}",
         user_msg
     );
-    let messages = vec![ChatMessage::user(proposal_prompt)];
+    let messages = vec![
+        ChatMessage::system(system_prompt.to_string()),
+        ChatMessage::user(proposal_prompt)
+    ];
 
     let mut phase1_results: HashMap<String, ModelProposal> = HashMap::new();
 
@@ -1130,7 +1394,10 @@ async fn execute_competitive(
                 user_msg, all_proposals_text, your_proposal
             );
 
-            let voting_messages = vec![ChatMessage::user(voting_prompt)];
+            let voting_messages = vec![
+                ChatMessage::system(system_prompt.to_string()),
+                ChatMessage::user(voting_prompt)
+            ];
 
             if let Ok(mut stream) = client.stream_chat_completion(model_id.clone(), voting_messages).await {
                 let mut vote_response = String::new();
