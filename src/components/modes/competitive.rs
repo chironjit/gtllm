@@ -218,7 +218,7 @@ fn compute_tallies(votes: &[ModelVote], model_ids: &[String]) -> (Vec<VoteTally>
 // ============================================================================
 
 #[component]
-pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<usize>) -> Element {
+pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<String>) -> Element {
     // State
     let mut selected_models = use_signal(|| Vec::<String>::new());
     let mut selection_step = use_signal(|| 0usize); // 0 = select models, 1 = chat
@@ -234,10 +234,10 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
     let mut temp_prompt = use_signal(String::new);
     
     // Load history if session_id is provided
-    let session_id_for_load = session_id;
+    let session_id_for_load = session_id.clone();
     use_hook(|| {
         if let Some(sid) = session_id_for_load {
-            if let Ok(session_data) = ChatHistory::load_session(sid) {
+            if let Ok(session_data) = ChatHistory::load_session(&sid) {
                 if let ChatHistory::Competitive(history) = session_data.history {
                     let selected_models_clone = history.selected_models.clone();
                     selected_models.set(selected_models_clone.clone());
@@ -347,7 +347,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut current_phase_clone = current_phase.clone();
             let templates = prompt_templates();
-            let session_id_for_save = session_id;
+            let session_id_for_save = session_id.clone();
             let selected_models_for_save = selected_models.read().clone();
             let prompt_templates_for_save = prompt_templates.read().clone();
 
@@ -570,11 +570,12 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     },
                 };
                 
+                let summary = ChatHistory::generate_chat_summary(&ChatHistory::Competitive(history.clone()));
                 let session = ChatSession {
-                    id: sid,
-                    title: format!("Competitive Chat {}", sid),
+                    id: sid.clone(),
+                    title: summary,
                     mode: ChatMode::Competitive,
-                    timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+                    timestamp: ChatHistory::format_timestamp(),
                 };
                 
                 let session_data = SessionData {

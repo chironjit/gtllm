@@ -1,5 +1,5 @@
 use super::common::{ChatInput, Modal, ModelSelector, ModelResponseCard};
-use crate::utils::{ChatMessage, InputSettings, OpenRouterClient, StreamEvent, Theme};
+use crate::utils::{ChatHistory, ChatMessage, ChatMode, ChatSession, InputSettings, OpenRouterClient, SessionData, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -270,6 +270,7 @@ pub struct ChoiceProps {
     theme: Signal<Theme>,
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
+    session_id: Option<String>,
 }
 
 impl PartialEq for ChoiceProps {
@@ -305,6 +306,41 @@ pub fn Choice(props: ChoiceProps) -> Element {
     let mut prompt_editor_open = use_signal(|| false);
     let mut editing_prompt_target = use_signal(|| PromptEditTarget::Decision);
     let mut temp_prompt = use_signal(String::new);
+    
+    // Load history if session_id is provided
+    let session_id = props.session_id.clone();
+    use_hook(|| {
+        if let Some(sid) = session_id {
+            if let Ok(session_data) = ChatHistory::load_session(&sid) {
+                if let ChatHistory::LLMChoice(history) = session_data.history {
+                    selected_models.set(history.selected_models.clone());
+                    // Convert history rounds to internal format
+                    let converted_rounds: Vec<ChoiceRound> = history.rounds
+                        .into_iter()
+                        .map(|r| {
+                            let strategy = match r.decision.as_str() {
+                                "collaborate" => Some(Strategy::Collaborate),
+                                "compete" => Some(Strategy::Compete),
+                                _ => None,
+                            };
+                            ChoiceRound {
+                                user_question: r.user_message,
+                                decisions: vec![], // Not stored in simplified format
+                                chosen_strategy: strategy,
+                                collaborative_result: None, // Not stored in simplified format
+                                competitive_result: None, // Not stored in simplified format
+                                current_phase: ChoicePhase::Complete, // Assume complete when loading
+                            }
+                        })
+                        .collect();
+                    conversation_history.set(converted_rounds);
+                    if !history.selected_models.is_empty() {
+                        selection_step.set(1);
+                    }
+                }
+            }
+        }
+    });
 
     // Handle model selection
     let on_models_selected = move |models: Vec<String>| {
@@ -354,6 +390,8 @@ pub fn Choice(props: ChoiceProps) -> Element {
             let mut current_phase_clone = current_phase.clone();
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
+            let session_id_for_save = props.session_id.clone();
+            let selected_models_for_save = selected_models.read().clone();
 
             // Initialize new round
             {
@@ -503,6 +541,56 @@ pub fn Choice(props: ChoiceProps) -> Element {
                             last_round.current_phase = ChoicePhase::Complete;
                         }
                         is_processing_clone.set(false);
+                        
+                        // Auto-save if session_id is provided
+                        if let Some(sid) = session_id_for_save {
+                            let history_rounds: Vec<crate::utils::LLMChoiceRound> = conversation_history_clone.read()
+                                .iter()
+                                .map(|r| {
+                                    let decision = match r.chosen_strategy {
+                                        Some(Strategy::Collaborate) => "collaborate".to_string(),
+                                        Some(Strategy::Compete) => "compete".to_string(),
+                                        None => "undecided".to_string(),
+                                    };
+                                    // Get content from collaborative or competitive result
+                                    let content = r.collaborative_result.as_ref()
+                                        .and_then(|cr| cr.phase3_consensus.as_ref().map(|c| c.content.clone()))
+                                        .or_else(|| {
+                                            r.competitive_result.as_ref()
+                                                .and_then(|cr| cr.winners.first().map(|_| "Competitive round completed".to_string()))
+                                        });
+                                    crate::utils::LLMChoiceRound {
+                                        user_message: r.user_question.clone(),
+                                        decision,
+                                        content,
+                                    }
+                                })
+                                .collect();
+                            
+                            let history = crate::utils::LLMChoiceHistory {
+                                rounds: history_rounds,
+                                selected_models: selected_models_for_save.clone(),
+                            };
+                            
+                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::LLMChoice(history.clone()));
+                            let session = ChatSession {
+                                id: sid.clone(),
+                                title: summary,
+                                mode: ChatMode::LLMChoice,
+                                timestamp: ChatHistory::format_timestamp(),
+                            };
+                            
+                            let session_data = SessionData {
+                                session,
+                                history: ChatHistory::LLMChoice(history),
+                                created_at: ChatHistory::format_timestamp(),
+                                updated_at: ChatHistory::format_timestamp(),
+                            };
+                            
+                            if let Err(e) = ChatHistory::save_session(&session_data) {
+                                eprintln!("Failed to save LLMChoice session {}: {}", sid, e);
+                            }
+                        }
                     }
                     Err(e) => {
                         // Handle error
@@ -518,6 +606,55 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                 .collect();
                         }
                         is_processing_clone.set(false);
+                        
+                        // Auto-save even on error
+                        if let Some(sid) = session_id_for_save {
+                            let history_rounds: Vec<crate::utils::LLMChoiceRound> = conversation_history_clone.read()
+                                .iter()
+                                .map(|r| {
+                                    let decision = match r.chosen_strategy {
+                                        Some(Strategy::Collaborate) => "collaborate".to_string(),
+                                        Some(Strategy::Compete) => "compete".to_string(),
+                                        None => "undecided".to_string(),
+                                    };
+                                    let content = r.collaborative_result.as_ref()
+                                        .and_then(|cr| cr.phase3_consensus.as_ref().map(|c| c.content.clone()))
+                                        .or_else(|| {
+                                            r.competitive_result.as_ref()
+                                                .and_then(|cr| cr.winners.first().map(|_| "Competitive round completed".to_string()))
+                                        });
+                                    crate::utils::LLMChoiceRound {
+                                        user_message: r.user_question.clone(),
+                                        decision,
+                                        content,
+                                    }
+                                })
+                                .collect();
+                            
+                            let history = crate::utils::LLMChoiceHistory {
+                                rounds: history_rounds,
+                                selected_models: selected_models_for_save.clone(),
+                            };
+                            
+                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::LLMChoice(history.clone()));
+                            let session = ChatSession {
+                                id: sid.clone(),
+                                title: summary,
+                                mode: ChatMode::LLMChoice,
+                                timestamp: ChatHistory::format_timestamp(),
+                            };
+                            
+                            let session_data = SessionData {
+                                session,
+                                history: ChatHistory::LLMChoice(history),
+                                created_at: ChatHistory::format_timestamp(),
+                                updated_at: ChatHistory::format_timestamp(),
+                            };
+                            
+                            if let Err(e) = ChatHistory::save_session(&session_data) {
+                                eprintln!("Failed to save LLMChoice session {}: {}", sid, e);
+                            }
+                        }
                     }
                 }
             });

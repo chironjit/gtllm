@@ -51,7 +51,7 @@ fn App() -> Element {
     // Messages for arena modes
     let mut arena_messages = use_signal(|| Vec::<ArenaMessage>::new());
 
-    // Chat sessions - load from disk on startup
+    // Chat sessions - load from disk on startup with summaries
     let mut sessions = use_signal(|| {
         ChatHistory::list_sessions()
             .unwrap_or_else(|e| {
@@ -59,10 +59,19 @@ fn App() -> Element {
                 Vec::new()
             })
             .into_iter()
-            .map(|sd| sd.session)
+            .map(|mut sd| {
+                // Generate summary from history if title is generic
+                if sd.session.title.starts_with("Standard Chat") 
+                    || sd.session.title.starts_with("PvP Chat")
+                    || sd.session.title.starts_with("Competitive Chat") {
+                    let summary = ChatHistory::generate_chat_summary(&sd.history);
+                    sd.session.title = summary;
+                }
+                sd.session
+            })
             .collect::<Vec<_>>()
     });
-    let mut current_session = use_signal(|| None::<usize>);
+    let mut current_session = use_signal(|| None::<String>);
 
     // Input settings
     let mut input_settings = use_signal(|| InputSettings {
@@ -132,9 +141,9 @@ fn App() -> Element {
     };
 
     // Handler for selecting a session
-    let select_session = move |session_id: usize| {
+    let select_session = move |session_id: String| {
         if let Some(session) = sessions.read().iter().find(|s| s.id == session_id) {
-            current_session.set(Some(session_id));
+            current_session.set(Some(session_id.clone()));
             current_view.set(AppView::ChatMode(session.mode));
             // Messages will be loaded by the mode component itself
             messages.write().clear();
@@ -144,11 +153,10 @@ fn App() -> Element {
 
     // Handler for mode selection from NewChat view
     let select_mode = move |mode: ChatMode| {
-        let session_id = ChatHistory::generate_session_id()
-            .unwrap_or_else(|_| sessions.read().len());
+        let session_id = ChatHistory::generate_session_id();
         let new_session = ChatSession {
-            id: session_id,
-            title: format!("{} Chat {}", mode.name(), session_id),
+            id: session_id.clone(),
+            title: format!("{} Chat", mode.name()),
             mode,
             timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
         };
@@ -166,7 +174,7 @@ fn App() -> Element {
 
     // Handler for closing settings
     let close_settings = move |_| {
-        if let Some(session_id) = *current_session.read() {
+        if let Some(session_id) = current_session.read().clone() {
             if let Some(session) = sessions.read().iter().find(|s| s.id == session_id) {
                 current_view.set(AppView::ChatMode(session.mode));
             } else {
@@ -373,7 +381,7 @@ fn App() -> Element {
                                 }
                             },
                             AppView::ChatMode(mode) => {
-                                let session_id = *current_session.read();
+                                let session_id = current_session.read().clone();
                                 match mode {
                                     ChatMode::Standard => rsx! {
                                         Standard {
@@ -396,6 +404,7 @@ fn App() -> Element {
                                             theme,
                                             client: openrouter_client.read().clone(),
                                             input_settings,
+                                            session_id,
                                         }
                                     },
                                     ChatMode::Competitive => rsx! {
@@ -411,6 +420,7 @@ fn App() -> Element {
                                             theme,
                                             client: openrouter_client.read().clone(),
                                             input_settings,
+                                            session_id,
                                         }
                                     },
                                 }

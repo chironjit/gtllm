@@ -1,6 +1,6 @@
 use super::common::{ChatInput, PromptCard, PromptEditorModal, PromptType};
 use crate::utils::{
-    ChatMessage, InputSettings, Model, OpenRouterClient, StreamEvent, Theme,
+    ChatHistory, ChatMessage, ChatMode, ChatSession, InputSettings, Model, OpenRouterClient, SessionData, StreamEvent, Theme,
 };
 use dioxus::prelude::*;
 use futures::stream::StreamExt;
@@ -101,6 +101,7 @@ pub struct CollaborativeProps {
     theme: Signal<Theme>,
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
+    session_id: Option<String>,
 }
 
 impl PartialEq for CollaborativeProps {
@@ -140,6 +141,50 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
     let current_phase = use_signal(|| CollaborativePhase::Initial);
     let is_processing = use_signal(|| false);
     let current_streaming_responses = use_signal(|| HashMap::<String, String>::new());
+
+    // Load history if session_id is provided
+    let session_id = props.session_id.clone();
+    use_hook(|| {
+        if let Some(sid) = session_id {
+            if let Ok(session_data) = ChatHistory::load_session(&sid) {
+                if let ChatHistory::Collaborative(history) = session_data.history {
+                    selected_models.set(history.selected_models.clone());
+                    // Convert history rounds to internal format
+                    let converted_rounds: Vec<CollaborativeRound> = history.rounds
+                        .into_iter()
+                        .map(|r| {
+                            // Convert chat_history::ModelResponse to internal ModelResponse
+                            let phase1_responses: Vec<ModelResponse> = r.model_responses
+                                .into_iter()
+                                .map(|mr| ModelResponse {
+                                    model_id: mr.model_id,
+                                    content: mr.content,
+                                    error_message: mr.error_message,
+                                })
+                                .collect();
+                            // For now, we'll reconstruct from the simplified history format
+                            // The history only stores final consensus, so we'll mark as complete
+                            CollaborativeRound {
+                                user_question: r.user_message,
+                                phase1_responses,
+                                phase2_reviews: vec![], // Not stored in simplified format
+                                phase3_consensus: r.final_consensus.as_ref().map(|consensus| ModelResponse {
+                                    model_id: "consensus".to_string(),
+                                    content: consensus.clone(),
+                                    error_message: None,
+                                }),
+                                current_phase: CollaborativePhase::Complete,
+                            }
+                        })
+                        .collect();
+                    conversation_history.set(converted_rounds);
+                    if !history.selected_models.is_empty() {
+                        selection_step.set(1);
+                    }
+                }
+            }
+        }
+    });
 
     // Fetch models on component mount
     let _fetch = use_hook(|| {
@@ -201,6 +246,8 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let templates = prompt_templates.read().clone();
+            let session_id_for_save = props.session_id.clone();
+            let selected_models_for_save = selected_models.read().clone();
 
             // Initialize new round
             conversation_history_clone.write().push(CollaborativeRound {
@@ -455,6 +502,55 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                         current_streaming_clone.write().clear();
                         current_phase_clone.set(CollaborativePhase::Complete);
                         is_processing_clone.set(false);
+                        
+                        // Auto-save if session_id is provided
+                        if let Some(sid) = session_id_for_save {
+                            let history_rounds: Vec<crate::utils::CollaborativeRound> = conversation_history_clone.read()
+                                .iter()
+                                .map(|r| {
+                                    // Convert internal format to history format
+                                    // Use phase1_responses as model_responses, consensus content as final_consensus
+                                    let model_responses: Vec<crate::utils::ModelResponse> = r.phase1_responses.iter()
+                                        .map(|mr| crate::utils::ModelResponse {
+                                            model_id: mr.model_id.clone(),
+                                            content: mr.content.clone(),
+                                            error_message: mr.error_message.clone(),
+                                        })
+                                        .collect();
+                                    let final_consensus = r.phase3_consensus.as_ref().map(|c| c.content.clone());
+                                    crate::utils::CollaborativeRound {
+                                        user_message: r.user_question.clone(),
+                                        model_responses,
+                                        final_consensus,
+                                    }
+                                })
+                                .collect();
+                            
+                            let history = crate::utils::CollaborativeHistory {
+                                rounds: history_rounds,
+                                selected_models: selected_models_for_save.clone(),
+                                system_prompt: String::new(), // Collaborative doesn't use a single system prompt
+                            };
+                            
+                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::Collaborative(history.clone()));
+                            let session = ChatSession {
+                                id: sid.clone(),
+                                title: summary,
+                                mode: ChatMode::Collaborative,
+                                timestamp: ChatHistory::format_timestamp(),
+                            };
+                            
+                            let session_data = SessionData {
+                                session,
+                                history: ChatHistory::Collaborative(history),
+                                created_at: ChatHistory::format_timestamp(),
+                                updated_at: ChatHistory::format_timestamp(),
+                            };
+                            
+                            if let Err(e) = ChatHistory::save_session(&session_data) {
+                                eprintln!("Failed to save collaborative session {}: {}", sid, e);
+                            }
+                        }
                     }
                     Err(e) => {
                         // Handle error
@@ -469,6 +565,53 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                 .collect();
                         }
                         is_processing_clone.set(false);
+                        
+                        // Auto-save even on error
+                        if let Some(sid) = session_id_for_save {
+                            let history_rounds: Vec<crate::utils::CollaborativeRound> = conversation_history_clone.read()
+                                .iter()
+                                .map(|r| {
+                                    let model_responses: Vec<crate::utils::ModelResponse> = r.phase1_responses.iter()
+                                        .map(|mr| crate::utils::ModelResponse {
+                                            model_id: mr.model_id.clone(),
+                                            content: mr.content.clone(),
+                                            error_message: mr.error_message.clone(),
+                                        })
+                                        .collect();
+                                    let final_consensus = r.phase3_consensus.as_ref().map(|c| c.content.clone());
+                                    crate::utils::CollaborativeRound {
+                                        user_message: r.user_question.clone(),
+                                        model_responses,
+                                        final_consensus,
+                                    }
+                                })
+                                .collect();
+                            
+                            let history = crate::utils::CollaborativeHistory {
+                                rounds: history_rounds,
+                                selected_models: selected_models_for_save.clone(),
+                                system_prompt: String::new(),
+                            };
+                            
+                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::Collaborative(history.clone()));
+                            let session = ChatSession {
+                                id: sid.clone(),
+                                title: summary,
+                                mode: ChatMode::Collaborative,
+                                timestamp: ChatHistory::format_timestamp(),
+                            };
+                            
+                            let session_data = SessionData {
+                                session,
+                                history: ChatHistory::Collaborative(history),
+                                created_at: ChatHistory::format_timestamp(),
+                                updated_at: ChatHistory::format_timestamp(),
+                            };
+                            
+                            if let Err(e) = ChatHistory::save_session(&session_data) {
+                                eprintln!("Failed to save collaborative session {}: {}", sid, e);
+                            }
+                        }
                     }
                 }
             });

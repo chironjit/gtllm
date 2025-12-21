@@ -1,14 +1,14 @@
-use crate::utils::{ChatSession, Theme};
+use crate::utils::{ChatHistory, ChatSession, Theme};
 use dioxus::prelude::*;
 
 #[component]
 pub fn Sidebar(
     theme: Signal<Theme>,
     sessions: Signal<Vec<ChatSession>>,
-    current_session: Signal<Option<usize>>,
+    current_session: Signal<Option<String>>,
     collapsed: Signal<bool>,
     on_new_chat: EventHandler<()>,
-    on_select_session: EventHandler<usize>,
+    on_select_session: EventHandler<String>,
 ) -> Element {
     let _ = theme.read();
     let is_collapsed = *collapsed.read();
@@ -80,13 +80,15 @@ pub fn Sidebar(
                             for session in sessions.read().iter() {
                                 {
                                     let is_active = current_session.read().as_ref() == Some(&session.id);
-                                    let session_id = session.id;
-                                    let title_preview = session.title.chars().take(if is_collapsed { 10 } else { 50 }).collect::<String>();
+                                    let session_id_for_click = session.id.clone();
 
                                     rsx! {
                                         button {
                                             key: "{session.id}",
-                                            onclick: move |_| on_select_session.call(session_id),
+                                            onclick: move |_| {
+                                                let sid = session_id_for_click.clone();
+                                                on_select_session.call(sid);
+                                            },
                                             class: "w-full rounded-lg transition-all duration-200",
                                             class: if is_collapsed {
                                                 "p-2 flex items-center justify-center"
@@ -164,7 +166,7 @@ pub fn Sidebar(
                                                         }
                                                         div {
                                                             class: "text-[10px] text-[var(--color-base-content)]/50 mt-0.5",
-                                                            "{session.timestamp}"
+                                                            "{session.mode.name()} • {ChatHistory::format_timestamp_date(&session.timestamp)}"
                                                         }
                                                     }
                                                 }

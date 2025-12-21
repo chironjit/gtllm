@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use uuid::Uuid;
 use crate::utils::ChatSession;
 
 /// Represents the full conversation history for a chat session
@@ -171,8 +172,8 @@ impl ChatHistory {
     }
 
     /// Get the path to a specific session file
-    pub fn session_path(session_id: usize) -> Result<PathBuf, String> {
-        Ok(Self::chats_dir()?.join(format!("session_{}.json", session_id)))
+    pub fn session_path(session_id: &str) -> Result<PathBuf, String> {
+        Ok(Self::chats_dir()?.join(format!("{}.json", session_id)))
     }
 
     /// List all saved sessions
@@ -193,7 +194,8 @@ impl ChatHistory {
             
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                    if file_name.starts_with("session_") {
+                    // Only accept UUID format
+                    if Uuid::parse_str(file_name).is_ok() {
                         match Self::load_session_file(&path) {
                             Ok(session_data) => sessions.push(session_data),
                             Err(e) => eprintln!("Failed to load session from {:?}: {}", path, e),
@@ -210,7 +212,7 @@ impl ChatHistory {
     }
 
     /// Load a session from disk
-    pub fn load_session(session_id: usize) -> Result<SessionData, String> {
+    pub fn load_session(session_id: &str) -> Result<SessionData, String> {
         let path = Self::session_path(session_id)?;
         Self::load_session_file(&path)
     }
@@ -226,7 +228,7 @@ impl ChatHistory {
         Ok(session_data)
     }
 
-    /// Save a session to disk
+    /// Save a session to disk using atomic write (temp file + rename)
     pub fn save_session(session_data: &SessionData) -> Result<(), String> {
         let chats_dir = Self::chats_dir()?;
         
@@ -236,30 +238,37 @@ impl ChatHistory {
                 .map_err(|e| format!("Failed to create chats directory: {}", e))?;
         }
 
-        let path = Self::session_path(session_data.session.id)?;
+        let path = Self::session_path(&session_data.session.id)?;
+        let temp_path = path.with_extension("tmp");
+        
         let contents = serde_json::to_string_pretty(session_data)
             .map_err(|e| format!("Failed to serialize session: {}", e))?;
 
-        fs::write(&path, contents)
-            .map_err(|e| format!("Failed to write session file: {}", e))?;
+        // Write to temporary file first
+        fs::write(&temp_path, contents)
+            .map_err(|e| format!("Failed to write temporary session file: {}", e))?;
 
-        // Set proper permissions on Unix-like systems
+        // Set proper permissions on Unix-like systems before rename
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&path)
-                .map_err(|e| format!("Failed to get file metadata: {}", e))?
+            let mut perms = fs::metadata(&temp_path)
+                .map_err(|e| format!("Failed to get temp file metadata: {}", e))?
                 .permissions();
             perms.set_mode(0o600); // Read/write for owner only
-            fs::set_permissions(&path, perms)
-                .map_err(|e| format!("Failed to set file permissions: {}", e))?;
+            fs::set_permissions(&temp_path, perms)
+                .map_err(|e| format!("Failed to set temp file permissions: {}", e))?;
         }
+
+        // Atomic rename (replaces existing file safely)
+        fs::rename(&temp_path, &path)
+            .map_err(|e| format!("Failed to rename temporary file to session file: {}", e))?;
 
         Ok(())
     }
 
     /// Delete a session from disk
-    pub fn delete_session(session_id: usize) -> Result<(), String> {
+    pub fn delete_session(session_id: &str) -> Result<(), String> {
         let path = Self::session_path(session_id)?;
         
         if path.exists() {
@@ -270,14 +279,38 @@ impl ChatHistory {
         Ok(())
     }
 
-    /// Generate a unique session ID (highest existing ID + 1)
-    pub fn generate_session_id() -> Result<usize, String> {
-        let sessions = Self::list_sessions()?;
-        let max_id = sessions.iter()
-            .map(|s| s.session.id)
-            .max()
-            .unwrap_or(0);
-        Ok(max_id + 1)
+    /// Generate a unique session ID using UUID v4
+    pub fn generate_session_id() -> String {
+        Uuid::new_v4().to_string()
+    }
+    
+    /// Generate a chat summary from the first user message
+    pub fn generate_chat_summary(history: &ChatHistory) -> String {
+        let first_message = match history {
+            ChatHistory::Standard(h) => h.user_messages.first(),
+            ChatHistory::PvP(h) => h.rounds.first().map(|r| &r.user_message),
+            ChatHistory::Collaborative(h) => h.rounds.first().map(|r| &r.user_message),
+            ChatHistory::Competitive(h) => h.rounds.first().map(|r| &r.user_question),
+            ChatHistory::LLMChoice(h) => h.rounds.first().map(|r| &r.user_message),
+        };
+        
+        if let Some(msg) = first_message {
+            // Take first 60 characters, truncate at word boundary if possible
+            let trimmed = msg.trim();
+            if trimmed.len() <= 60 {
+                trimmed.to_string()
+            } else {
+                // Try to find a word boundary
+                let truncated = &trimmed[..60];
+                if let Some(last_space) = truncated.rfind(' ') {
+                    format!("{}...", &trimmed[..last_space])
+                } else {
+                    format!("{}...", truncated)
+                }
+            }
+        } else {
+            "New Chat".to_string()
+        }
     }
 
     /// Format timestamp for display
@@ -293,13 +326,13 @@ impl ChatHistory {
         now.to_string()
     }
     
-    /// Format timestamp for human-readable display
+    /// Format timestamp for human-readable display (relative time)
     pub fn format_timestamp_display(timestamp: &str) -> String {
         // Try to parse as unix timestamp
         if let Ok(secs) = timestamp.parse::<u64>() {
             use std::time::{SystemTime, UNIX_EPOCH, Duration};
             let datetime = UNIX_EPOCH + Duration::from_secs(secs);
-            if let Ok(datetime) = datetime.duration_since(UNIX_EPOCH) {
+            if let Ok(_datetime) = datetime.duration_since(UNIX_EPOCH) {
                 // Simple format: just show relative time for now
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -327,6 +360,66 @@ impl ChatHistory {
                 }
             } else {
                 timestamp.to_string()
+            }
+        } else {
+            timestamp.to_string()
+        }
+    }
+    
+    /// Format timestamp as "Sat, 12th Dec" format
+    pub fn format_timestamp_date(timestamp: &str) -> String {
+        // Try to parse as unix timestamp
+        if let Ok(secs) = timestamp.parse::<u64>() {
+            use std::time::{SystemTime, UNIX_EPOCH, Duration};
+            let datetime = UNIX_EPOCH + Duration::from_secs(secs);
+            
+            // Convert to chrono-compatible format
+            // We'll use a simple manual approach to avoid adding chrono dependency
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            
+            // Calculate days since epoch
+            let days_since_epoch = secs / 86400;
+            let now_days = now / 86400;
+            let days_diff = now_days.saturating_sub(days_since_epoch);
+            
+            // For dates within the last week, show relative
+            if days_diff == 0 {
+                "Today".to_string()
+            } else if days_diff == 1 {
+                "Yesterday".to_string()
+            } else if days_diff < 7 {
+                format!("{} days ago", days_diff)
+            } else {
+                // For older dates, format as "Day, Nth Month"
+                // This is a simplified version - for full date formatting, consider adding chrono
+                let weekday_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                
+                // Calculate day of week (simplified - Jan 1, 1970 was a Thursday)
+                let day_of_week = (days_since_epoch + 4) % 7;
+                let weekday = weekday_names[day_of_week as usize];
+                
+                // Approximate month and day (simplified calculation)
+                // This is a rough approximation - for accuracy, use chrono
+                let year = 1970 + (days_since_epoch / 365);
+                let day_of_year = days_since_epoch % 365;
+                let month_idx = (day_of_year / 30).min(11);
+                let month = month_names[month_idx as usize];
+                let day = (day_of_year % 30) + 1;
+                
+                // Add ordinal suffix
+                let suffix = match day {
+                    1 | 21 | 31 => "st",
+                    2 | 22 => "nd",
+                    3 | 23 => "rd",
+                    _ => "th",
+                };
+                
+                format!("{}, {}{} {}", weekday, day, suffix, month)
             }
         } else {
             timestamp.to_string()

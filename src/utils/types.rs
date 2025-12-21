@@ -64,7 +64,7 @@ pub struct ArenaMessage {
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ChatSession {
-    pub id: usize,
+    pub id: String, // UUID
     pub title: String,
     pub mode: ChatMode,
     pub timestamp: String,

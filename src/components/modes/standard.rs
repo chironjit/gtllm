@@ -25,7 +25,7 @@ pub struct StandardProps {
     theme: Signal<Theme>,
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
-    session_id: Option<usize>,
+    session_id: Option<String>,
 }
 
 impl PartialEq for StandardProps {
@@ -60,10 +60,10 @@ pub fn Standard(props: StandardProps) -> Element {
     });
     
     // Load history if session_id is provided
-    let session_id = props.session_id;
+    let session_id = props.session_id.clone();
     use_hook(|| {
         if let Some(sid) = session_id {
-            if let Ok(session_data) = ChatHistory::load_session(sid) {
+            if let Ok(session_data) = ChatHistory::load_session(&sid) {
                 if let ChatHistory::Standard(history) = session_data.history {
                     selected_models.set(history.selected_models);
                     user_messages.set(history.user_messages);
@@ -94,47 +94,6 @@ pub fn Standard(props: StandardProps) -> Element {
         }
     });
     
-    // Helper function to save history
-    let save_history = move |sid: usize| {
-        let history = StandardHistory {
-            user_messages: user_messages.read().clone(),
-            model_responses: model_responses.read().iter()
-                .map(|responses| {
-                    responses.iter()
-                        .map(|r| crate::utils::ModelResponse {
-                            model_id: r.model_id.clone(),
-                            content: r.content.clone(),
-                            error_message: r.error_message.clone(),
-                        })
-                        .collect()
-                })
-                .collect(),
-            selected_models: selected_models.read().clone(),
-            system_prompt: system_prompt.read().clone(),
-            conversation_history: crate::utils::ConversationHistory {
-                single_model: conversation_history.read().single_model.clone(),
-                multi_model: conversation_history.read().multi_model.clone(),
-            },
-        };
-        
-        let session = ChatSession {
-            id: sid,
-            title: format!("Standard Chat {}", sid),
-            mode: ChatMode::Standard,
-            timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
-        };
-        
-        let session_data = SessionData {
-            session,
-            history: ChatHistory::Standard(history),
-            created_at: ChatHistory::format_timestamp(),
-            updated_at: ChatHistory::format_timestamp(),
-        };
-        
-        if let Err(e) = ChatHistory::save_session(&session_data) {
-            eprintln!("Failed to save session: {}", e);
-        }
-    };
 
     // Handle model selection
     let on_models_selected = move |models: Vec<String>| {
@@ -181,6 +140,7 @@ pub fn Standard(props: StandardProps) -> Element {
             let mut current_streaming_responses_clone = current_streaming_responses.clone();
             let mut model_responses_clone = model_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
+            let session_id_for_save = props.session_id.clone();
 
             spawn(async move {
                 is_streaming_clone.set(true);
@@ -312,7 +272,7 @@ pub fn Standard(props: StandardProps) -> Element {
                 is_streaming_clone.set(false);
                 
                 // Auto-save if session_id is provided
-                if let Some(sid) = props.session_id {
+                if let Some(sid) = session_id_for_save {
                     // Reconstruct history for saving
                     let history = StandardHistory {
                         user_messages: user_messages.read().clone(),
@@ -335,11 +295,12 @@ pub fn Standard(props: StandardProps) -> Element {
                         },
                     };
                     
+                    let summary = ChatHistory::generate_chat_summary(&ChatHistory::Standard(history.clone()));
                     let session = ChatSession {
-                        id: sid,
-                        title: format!("Standard Chat {}", sid),
+                        id: sid.clone(),
+                        title: summary,
                         mode: ChatMode::Standard,
-                        timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+                        timestamp: ChatHistory::format_timestamp(),
                     };
                     
                     let session_data = SessionData {

@@ -52,7 +52,7 @@ pub struct PvPProps {
     theme: Signal<Theme>,
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
-    session_id: Option<usize>,
+    session_id: Option<String>,
 }
 
 impl PartialEq for PvPProps {
@@ -92,10 +92,10 @@ pub fn PvP(props: PvPProps) -> Element {
     let mut temp_prompt = use_signal(String::new);
     
     // Load history if session_id is provided
-    let session_id = props.session_id;
+    let session_id = props.session_id.clone();
     use_hook(|| {
         if let Some(sid) = session_id {
-            if let Ok(session_data) = ChatHistory::load_session(sid) {
+            if let Ok(session_data) = ChatHistory::load_session(&sid) {
                 if let ChatHistory::PvP(history) = session_data.history {
                     let bot_models_clone = history.bot_models.clone();
                     let moderator_model_clone = history.moderator_model.clone();
@@ -230,7 +230,7 @@ pub fn PvP(props: PvPProps) -> Element {
             let mut current_bot_responses_clone = current_bot_responses.clone();
             let mut current_moderator_response_clone = current_moderator_response.clone();
             let mut conversation_history_clone = conversation_history.clone();
-            let session_id_for_save = props.session_id;
+            let session_id_for_save = props.session_id.clone();
             let bot_models_for_save = bot_models.read().clone();
             let moderator_model_for_save = moderator_model.read().clone();
             let system_prompts_for_save = system_prompts.read().clone();
@@ -392,11 +392,12 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                         },
                                                                     };
                                                                     
+                                                                    let summary = ChatHistory::generate_chat_summary(&ChatHistory::PvP(history.clone()));
                                                                     let session = ChatSession {
-                                                                        id: sid,
-                                                                        title: format!("PvP Chat {}", sid),
+                                                                        id: sid.clone(),
+                                                                        title: summary,
                                                                         mode: ChatMode::PvP,
-                                                                        timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+                                                                        timestamp: ChatHistory::format_timestamp(),
                                                                     };
                                                                     
                                                                     let session_data = SessionData {
