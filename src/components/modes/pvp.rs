@@ -1,5 +1,5 @@
 use super::common::{ChatInput, Modal};
-use crate::utils::{ChatMessage, InputSettings, Model, OpenRouterClient, StreamEvent, Theme};
+use crate::utils::{ChatMessage, ChatHistory, ChatMode, ChatSession, InputSettings, Model, OpenRouterClient, PvPHistory, SessionData, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
@@ -52,6 +52,7 @@ pub struct PvPProps {
     theme: Signal<Theme>,
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
+    session_id: Option<usize>,
 }
 
 impl PartialEq for PvPProps {
@@ -89,6 +90,53 @@ pub fn PvP(props: PvPProps) -> Element {
     let mut prompt_editor_open = use_signal(|| false);
     let mut editing_prompt_target = use_signal(|| PromptEditTarget::Bot);
     let mut temp_prompt = use_signal(String::new);
+    
+    // Load history if session_id is provided
+    let session_id = props.session_id;
+    use_hook(|| {
+        if let Some(sid) = session_id {
+            if let Ok(session_data) = ChatHistory::load_session(sid) {
+                if let ChatHistory::PvP(history) = session_data.history {
+                    let bot_models_clone = history.bot_models.clone();
+                    let moderator_model_clone = history.moderator_model.clone();
+                    bot_models.set(bot_models_clone.clone());
+                    moderator_model.set(moderator_model_clone.clone());
+                    system_prompts.set(SystemPrompts {
+                        bot: history.system_prompts.bot,
+                        moderator: history.system_prompts.moderator,
+                    });
+                    
+                    // Convert rounds from history to internal format
+                    let converted_rounds: Vec<ConversationRound> = history.rounds
+                        .into_iter()
+                        .map(|r| ConversationRound {
+                            user_message: r.user_message,
+                            bot1_response: BotResponse {
+                                model_id: r.bot1_response.model_id,
+                                content: r.bot1_response.content,
+                                error_message: r.bot1_response.error_message,
+                            },
+                            bot2_response: BotResponse {
+                                model_id: r.bot2_response.model_id,
+                                content: r.bot2_response.content,
+                                error_message: r.bot2_response.error_message,
+                            },
+                            moderator_judgment: r.moderator_judgment.map(|m| ModeratorResponse {
+                                content: m.content,
+                                error_message: m.error_message,
+                            }),
+                        })
+                        .collect();
+                    conversation_history.set(converted_rounds);
+                    
+                    // If models are loaded, go to chat step
+                    if !bot_models_clone.is_empty() && moderator_model_clone.is_some() {
+                        selection_step.set(2);
+                    }
+                }
+            }
+        }
+    });
 
     // Fetch models on component mount
     let _fetch = use_hook(|| {
@@ -182,6 +230,10 @@ pub fn PvP(props: PvPProps) -> Element {
             let mut current_bot_responses_clone = current_bot_responses.clone();
             let mut current_moderator_response_clone = current_moderator_response.clone();
             let mut conversation_history_clone = conversation_history.clone();
+            let session_id_for_save = props.session_id;
+            let bot_models_for_save = bot_models.read().clone();
+            let moderator_model_for_save = moderator_model.read().clone();
+            let system_prompts_for_save = system_prompts.read().clone();
 
             // Immediately add the user message and empty bot responses to show in UI
             conversation_history_clone.write().push(ConversationRound {
@@ -309,6 +361,56 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                 }
                                                                 current_moderator_response_clone.set(String::new());
                                                                 is_streaming_moderator_clone.set(false);
+                                                                
+                                                                // Auto-save if session_id is provided
+                                                                if let Some(sid) = session_id_for_save {
+                                                                    let history = PvPHistory {
+                                                                        rounds: conversation_history_clone.read().iter()
+                                                                            .map(|r| crate::utils::ConversationRound {
+                                                                                user_message: r.user_message.clone(),
+                                                                                bot1_response: crate::utils::BotResponse {
+                                                                                    model_id: r.bot1_response.model_id.clone(),
+                                                                                    content: r.bot1_response.content.clone(),
+                                                                                    error_message: r.bot1_response.error_message.clone(),
+                                                                                },
+                                                                                bot2_response: crate::utils::BotResponse {
+                                                                                    model_id: r.bot2_response.model_id.clone(),
+                                                                                    content: r.bot2_response.content.clone(),
+                                                                                    error_message: r.bot2_response.error_message.clone(),
+                                                                                },
+                                                                                moderator_judgment: r.moderator_judgment.as_ref().map(|m| crate::utils::ModeratorResponse {
+                                                                                    content: m.content.clone(),
+                                                                                    error_message: m.error_message.clone(),
+                                                                                }),
+                                                                            })
+                                                                            .collect(),
+                                                                        bot_models: bot_models_for_save.clone(),
+                                                                        moderator_model: moderator_model_for_save.clone(),
+                                                                        system_prompts: crate::utils::SystemPrompts {
+                                                                            bot: system_prompts_for_save.bot.clone(),
+                                                                            moderator: system_prompts_for_save.moderator.clone(),
+                                                                        },
+                                                                    };
+                                                                    
+                                                                    let session = ChatSession {
+                                                                        id: sid,
+                                                                        title: format!("PvP Chat {}", sid),
+                                                                        mode: ChatMode::PvP,
+                                                                        timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+                                                                    };
+                                                                    
+                                                                    let session_data = SessionData {
+                                                                        session,
+                                                                        history: ChatHistory::PvP(history),
+                                                                        created_at: ChatHistory::format_timestamp(),
+                                                                        updated_at: ChatHistory::format_timestamp(),
+                                                                    };
+                                                                    
+                                                                    if let Err(e) = ChatHistory::save_session(&session_data) {
+                                                                        eprintln!("Failed to save session: {}", e);
+                                                                    }
+                                                                }
+                                                                
                                                                 break;
                                                             }
                                                             StreamEvent::Error(e) => {

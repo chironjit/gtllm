@@ -1,5 +1,5 @@
 use super::common::{ChatInput, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, VoteDisplay, VoteTally, VoteTallyProps};
-use crate::utils::{ChatMessage, InputSettings, Model, OpenRouterClient, StreamEvent, Theme};
+use crate::utils::{ChatMessage, ChatHistory, ChatMode, ChatSession, CompetitiveHistory, InputSettings, Model, OpenRouterClient, SessionData, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -218,7 +218,7 @@ fn compute_tallies(votes: &[ModelVote], model_ids: &[String]) -> (Vec<VoteTally>
 // ============================================================================
 
 #[component]
-pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>) -> Element {
+pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<usize>) -> Element {
     // State
     let mut selected_models = use_signal(|| Vec::<String>::new());
     let mut selection_step = use_signal(|| 0usize); // 0 = select models, 1 = chat
@@ -232,6 +232,67 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
     let mut prompt_editor_open = use_signal(|| false);
     let mut editing_prompt_type = use_signal(|| CompetitivePromptType::Proposal);
     let mut temp_prompt = use_signal(String::new);
+    
+    // Load history if session_id is provided
+    let session_id_for_load = session_id;
+    use_hook(|| {
+        if let Some(sid) = session_id_for_load {
+            if let Ok(session_data) = ChatHistory::load_session(sid) {
+                if let ChatHistory::Competitive(history) = session_data.history {
+                    let selected_models_clone = history.selected_models.clone();
+                    selected_models.set(selected_models_clone.clone());
+                    prompt_templates.set(PromptTemplates {
+                        proposal: history.prompt_templates.proposal,
+                        voting: history.prompt_templates.voting,
+                    });
+                    
+                    // Convert rounds from history to internal format
+                    let converted_rounds: Vec<CompetitiveRound> = history.rounds
+                        .into_iter()
+                        .map(|r| CompetitiveRound {
+                            user_question: r.user_question,
+                            phase1_proposals: r.phase1_proposals.into_iter()
+                                .map(|p| ModelProposal {
+                                    model_id: p.model_id,
+                                    content: p.content,
+                                    error_message: p.error_message,
+                                })
+                                .collect(),
+                            phase2_votes: r.phase2_votes.into_iter()
+                                .map(|v| ModelVote {
+                                    voter_id: v.voter_id,
+                                    voted_for: v.voted_for,
+                                    raw_response: v.raw_response,
+                                    error_message: v.error_message,
+                                })
+                                .collect(),
+                            vote_tallies: r.vote_tallies.into_iter()
+                                .map(|t| VoteTally {
+                                    model_id: t.model_id,
+                                    vote_count: t.vote_count,
+                                    voters: t.voters,
+                                })
+                                .collect(),
+                            winners: r.winners,
+                            current_phase: match r.current_phase.as_str() {
+                                "proposal" => CompetitivePhase::Proposal,
+                                "voting" => CompetitivePhase::Voting,
+                                "tallying" => CompetitivePhase::Tallying,
+                                "complete" => CompetitivePhase::Complete,
+                                _ => CompetitivePhase::Complete,
+                            },
+                        })
+                        .collect();
+                    conversation_history.set(converted_rounds);
+                    
+                    // If models are loaded, go to chat step
+                    if !selected_models_clone.is_empty() {
+                        selection_step.set(1);
+                    }
+                }
+            }
+        }
+    });
 
     // Search state for model selection
     let mut search_query = use_signal(|| String::new());
@@ -286,6 +347,9 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut current_phase_clone = current_phase.clone();
             let templates = prompt_templates();
+            let session_id_for_save = session_id;
+            let selected_models_for_save = selected_models.read().clone();
+            let prompt_templates_for_save = prompt_templates.read().clone();
 
             spawn(async move {
             // Create new round
@@ -461,6 +525,69 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             current_phase_clone.set(CompetitivePhase::Complete);
             conversation_history_clone.write().push(round);
             is_processing_clone.set(false);
+            
+            // Auto-save if session_id is provided
+            if let Some(sid) = session_id_for_save {
+                let history = CompetitiveHistory {
+                    rounds: conversation_history_clone.read().iter()
+                        .map(|r| crate::utils::CompetitiveRound {
+                            user_question: r.user_question.clone(),
+                            phase1_proposals: r.phase1_proposals.iter()
+                                .map(|p| crate::utils::ModelProposal {
+                                    model_id: p.model_id.clone(),
+                                    content: p.content.clone(),
+                                    error_message: p.error_message.clone(),
+                                })
+                                .collect(),
+                            phase2_votes: r.phase2_votes.iter()
+                                .map(|v| crate::utils::ModelVote {
+                                    voter_id: v.voter_id.clone(),
+                                    voted_for: v.voted_for.clone(),
+                                    raw_response: v.raw_response.clone(),
+                                    error_message: v.error_message.clone(),
+                                })
+                                .collect(),
+                            vote_tallies: r.vote_tallies.iter()
+                                .map(|t| crate::utils::VoteTally {
+                                    model_id: t.model_id.clone(),
+                                    vote_count: t.vote_count,
+                                    voters: t.voters.clone(),
+                                })
+                                .collect(),
+                            winners: r.winners.clone(),
+                            current_phase: match r.current_phase {
+                                CompetitivePhase::Proposal => "proposal",
+                                CompetitivePhase::Voting => "voting",
+                                CompetitivePhase::Tallying => "tallying",
+                                CompetitivePhase::Complete => "complete",
+                            }.to_string(),
+                        })
+                        .collect(),
+                    selected_models: selected_models_for_save.clone(),
+                    prompt_templates: crate::utils::PromptTemplates {
+                        proposal: prompt_templates_for_save.proposal.clone(),
+                        voting: prompt_templates_for_save.voting.clone(),
+                    },
+                };
+                
+                let session = ChatSession {
+                    id: sid,
+                    title: format!("Competitive Chat {}", sid),
+                    mode: ChatMode::Competitive,
+                    timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+                };
+                
+                let session_data = SessionData {
+                    session,
+                    history: ChatHistory::Competitive(history),
+                    created_at: ChatHistory::format_timestamp(),
+                    updated_at: ChatHistory::format_timestamp(),
+                };
+                
+                if let Err(e) = ChatHistory::save_session(&session_data) {
+                    eprintln!("Failed to save session: {}", e);
+                }
+            }
             });
         }
     };

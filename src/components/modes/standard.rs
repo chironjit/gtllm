@@ -1,5 +1,5 @@
 use super::common::{ChatInput, Modal, ModelSelector};
-use crate::utils::{ChatMessage, InputSettings, OpenRouterClient, StreamEvent, Theme};
+use crate::utils::{ChatMessage, ChatHistory, ChatMode, ChatSession, InputSettings, OpenRouterClient, SessionData, StandardHistory, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ pub struct StandardProps {
     theme: Signal<Theme>,
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
+    session_id: Option<usize>,
 }
 
 impl PartialEq for StandardProps {
@@ -57,6 +58,83 @@ pub fn Standard(props: StandardProps) -> Element {
         single_model: Vec::new(),
         multi_model: HashMap::new(),
     });
+    
+    // Load history if session_id is provided
+    let session_id = props.session_id;
+    use_hook(|| {
+        if let Some(sid) = session_id {
+            if let Ok(session_data) = ChatHistory::load_session(sid) {
+                if let ChatHistory::Standard(history) = session_data.history {
+                    selected_models.set(history.selected_models);
+                    user_messages.set(history.user_messages);
+                    system_prompt.set(history.system_prompt);
+                    
+                    // Convert ModelResponse from history to internal format
+                    let converted_responses: Vec<Vec<ModelResponse>> = history.model_responses
+                        .into_iter()
+                        .map(|responses| {
+                            responses.into_iter()
+                                .map(|r| ModelResponse {
+                                    model_id: r.model_id,
+                                    content: r.content,
+                                    error_message: r.error_message,
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    model_responses.set(converted_responses);
+                    
+                    // Convert ConversationHistory
+                    conversation_history.set(ConversationHistory {
+                        single_model: history.conversation_history.single_model,
+                        multi_model: history.conversation_history.multi_model,
+                    });
+                }
+            }
+        }
+    });
+    
+    // Helper function to save history
+    let save_history = move |sid: usize| {
+        let history = StandardHistory {
+            user_messages: user_messages.read().clone(),
+            model_responses: model_responses.read().iter()
+                .map(|responses| {
+                    responses.iter()
+                        .map(|r| crate::utils::ModelResponse {
+                            model_id: r.model_id.clone(),
+                            content: r.content.clone(),
+                            error_message: r.error_message.clone(),
+                        })
+                        .collect()
+                })
+                .collect(),
+            selected_models: selected_models.read().clone(),
+            system_prompt: system_prompt.read().clone(),
+            conversation_history: crate::utils::ConversationHistory {
+                single_model: conversation_history.read().single_model.clone(),
+                multi_model: conversation_history.read().multi_model.clone(),
+            },
+        };
+        
+        let session = ChatSession {
+            id: sid,
+            title: format!("Standard Chat {}", sid),
+            mode: ChatMode::Standard,
+            timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+        };
+        
+        let session_data = SessionData {
+            session,
+            history: ChatHistory::Standard(history),
+            created_at: ChatHistory::format_timestamp(),
+            updated_at: ChatHistory::format_timestamp(),
+        };
+        
+        if let Err(e) = ChatHistory::save_session(&session_data) {
+            eprintln!("Failed to save session: {}", e);
+        }
+    };
 
     // Handle model selection
     let on_models_selected = move |models: Vec<String>| {
@@ -232,6 +310,49 @@ pub fn Standard(props: StandardProps) -> Element {
                 model_responses_clone.write().push(final_responses);
                 current_streaming_responses_clone.write().clear();
                 is_streaming_clone.set(false);
+                
+                // Auto-save if session_id is provided
+                if let Some(sid) = props.session_id {
+                    // Reconstruct history for saving
+                    let history = StandardHistory {
+                        user_messages: user_messages.read().clone(),
+                        model_responses: model_responses_clone.read().iter()
+                            .map(|responses| {
+                                responses.iter()
+                                    .map(|r| crate::utils::ModelResponse {
+                                        model_id: r.model_id.clone(),
+                                        content: r.content.clone(),
+                                        error_message: r.error_message.clone(),
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                        selected_models: selected_models.read().clone(),
+                        system_prompt: system_prompt.read().clone(),
+                        conversation_history: crate::utils::ConversationHistory {
+                            single_model: conversation_history_clone.read().single_model.clone(),
+                            multi_model: conversation_history_clone.read().multi_model.clone(),
+                        },
+                    };
+                    
+                    let session = ChatSession {
+                        id: sid,
+                        title: format!("Standard Chat {}", sid),
+                        mode: ChatMode::Standard,
+                        timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+                    };
+                    
+                    let session_data = SessionData {
+                        session,
+                        history: ChatHistory::Standard(history),
+                        created_at: ChatHistory::format_timestamp(),
+                        updated_at: ChatHistory::format_timestamp(),
+                    };
+                    
+                    if let Err(e) = ChatHistory::save_session(&session_data) {
+                        eprintln!("Failed to save session: {}", e);
+                    }
+                }
             });
         }
     };

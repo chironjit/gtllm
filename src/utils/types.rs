@@ -5,12 +5,20 @@ pub enum AppView {
     Settings,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChatMode {
+    #[serde(rename = "standard")]
     Standard,
+    #[serde(rename = "pvp")]
     PvP,
+    #[serde(rename = "collaborative")]
     Collaborative,
+    #[serde(rename = "competitive")]
     Competitive,
+    #[serde(rename = "llm_choice")]
     LLMChoice,
 }
 
@@ -54,7 +62,7 @@ pub struct ArenaMessage {
     pub vote_count: Option<usize>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ChatSession {
     pub id: usize,
     pub title: String,

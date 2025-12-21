@@ -6,7 +6,7 @@ mod utils;
 use components::{
     Choice, Collaborative, Competitive, Header, NewChat, PvP, Settings as SettingsView, Sidebar, Standard,
 };
-use utils::{AppView, ArenaMessage, ChatMode, ChatSession, InputSettings, Message, OpenRouterClient, Settings, Theme};
+use utils::{AppView, ArenaMessage, ChatHistory, ChatMode, ChatSession, InputSettings, Message, OpenRouterClient, Settings, Theme};
 use std::sync::Arc;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
@@ -51,8 +51,17 @@ fn App() -> Element {
     // Messages for arena modes
     let mut arena_messages = use_signal(|| Vec::<ArenaMessage>::new());
 
-    // Chat sessions
-    let mut sessions = use_signal(|| Vec::<ChatSession>::new());
+    // Chat sessions - load from disk on startup
+    let mut sessions = use_signal(|| {
+        ChatHistory::list_sessions()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to load sessions: {}", e);
+                Vec::new()
+            })
+            .into_iter()
+            .map(|sd| sd.session)
+            .collect::<Vec<_>>()
+    });
     let mut current_session = use_signal(|| None::<usize>);
 
     // Input settings
@@ -127,7 +136,7 @@ fn App() -> Element {
         if let Some(session) = sessions.read().iter().find(|s| s.id == session_id) {
             current_session.set(Some(session_id));
             current_view.set(AppView::ChatMode(session.mode));
-            // In a real app, you would load the session's messages here
+            // Messages will be loaded by the mode component itself
             messages.write().clear();
             arena_messages.write().clear();
         }
@@ -135,14 +144,15 @@ fn App() -> Element {
 
     // Handler for mode selection from NewChat view
     let select_mode = move |mode: ChatMode| {
-        let session_id = sessions.read().len();
+        let session_id = ChatHistory::generate_session_id()
+            .unwrap_or_else(|_| sessions.read().len());
         let new_session = ChatSession {
             id: session_id,
-            title: format!("{} Chat {}", mode.name(), session_id + 1),
+            title: format!("{} Chat {}", mode.name(), session_id),
             mode,
-            timestamp: "Just now".to_string(),
+            timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
         };
-        sessions.write().push(new_session);
+        sessions.write().push(new_session.clone());
         current_session.set(Some(session_id));
         current_view.set(AppView::ChatMode(mode));
         messages.write().clear();
@@ -363,12 +373,14 @@ fn App() -> Element {
                                 }
                             },
                             AppView::ChatMode(mode) => {
+                                let session_id = *current_session.read();
                                 match mode {
                                     ChatMode::Standard => rsx! {
                                         Standard {
                                             theme,
                                             client: openrouter_client.read().clone(),
                                             input_settings,
+                                            session_id,
                                         }
                                     },
                                     ChatMode::PvP => rsx! {
@@ -376,6 +388,7 @@ fn App() -> Element {
                                             theme,
                                             client: openrouter_client.read().clone(),
                                             input_settings,
+                                            session_id,
                                         }
                                     },
                                     ChatMode::Collaborative => rsx! {
@@ -390,6 +403,7 @@ fn App() -> Element {
                                             theme,
                                             client: openrouter_client.read().clone(),
                                             input_settings,
+                                            session_id,
                                         }
                                     },
                                     ChatMode::LLMChoice => rsx! {
