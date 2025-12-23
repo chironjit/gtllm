@@ -51,25 +51,13 @@ fn App() -> Element {
     // Messages for arena modes
     let mut arena_messages = use_signal(|| Vec::<ArenaMessage>::new());
 
-    // Chat sessions - load from disk on startup with summaries
+    // Chat sessions - load from disk on startup (fast, no file I/O)
     let mut sessions = use_signal(|| {
         ChatHistory::list_sessions()
             .unwrap_or_else(|e| {
                 eprintln!("Failed to load sessions: {}", e);
                 Vec::new()
             })
-            .into_iter()
-            .map(|mut sd| {
-                // Generate summary from history if title is generic
-                if sd.session.title.starts_with("Standard Chat") 
-                    || sd.session.title.starts_with("PvP Chat")
-                    || sd.session.title.starts_with("Competitive Chat") {
-                    let summary = ChatHistory::generate_chat_summary(&sd.history);
-                    sd.session.title = summary;
-                }
-                sd.session
-            })
-            .collect::<Vec<_>>()
     });
     let mut current_session = use_signal(|| None::<String>);
 
@@ -153,12 +141,14 @@ fn App() -> Element {
 
     // Handler for mode selection from NewChat view
     let select_mode = move |mode: ChatMode| {
-        let session_id = ChatHistory::generate_session_id();
+        let timestamp = ChatHistory::format_timestamp();
+        let title = format!("{} Chat", mode.name());
+        let session_id = ChatHistory::generate_session_id(mode, &timestamp, &title);
         let new_session = ChatSession {
             id: session_id.clone(),
-            title: format!("{} Chat", mode.name()),
+            title,
             mode,
-            timestamp: ChatHistory::format_timestamp_display(&ChatHistory::format_timestamp()),
+            timestamp: ChatHistory::format_timestamp_display(&timestamp),
         };
         sessions.write().push(new_session.clone());
         current_session.set(Some(session_id));

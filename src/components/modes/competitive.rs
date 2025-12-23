@@ -372,6 +372,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
 
             match client.stream_chat_completion_multi(models.clone(), messages).await {
                 Ok(mut rx) => {
+                    let mut last_update = std::time::Instant::now();
                     while let Some(event) = rx.recv().await {
                         let model_id = event.model_id.clone();
 
@@ -381,6 +382,12 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                     .entry(model_id.clone())
                                     .and_modify(|s| s.push_str(&content))
                                     .or_insert(content);
+                                
+                                // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                if last_update.elapsed().as_millis() >= 16 {
+                                    tokio::task::yield_now().await;
+                                    last_update = std::time::Instant::now();
+                                }
                             }
                             StreamEvent::Done => {
                                 let final_content = current_streaming_clone.read().get(&model_id).cloned().unwrap_or_default();
@@ -461,11 +468,18 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     Ok(mut rx) => {
                         let mut vote_response = String::new();
 
+                        let mut last_update = std::time::Instant::now();
                         while let Some(event) = rx.next().await {
                             match event {
                                 StreamEvent::Content(content) => {
                                     vote_response.push_str(&content);
                                     current_streaming_clone.write().insert(model_id.clone(), vote_response.clone());
+                                    
+                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                    if last_update.elapsed().as_millis() >= 16 {
+                                        tokio::task::yield_now().await;
+                                        last_update = std::time::Instant::now();
+                                    }
                                 }
                                 StreamEvent::Done => {
                                     current_streaming_clone.write().remove(model_id);

@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use uuid::Uuid;
-use crate::utils::ChatSession;
+use crate::utils::{ChatSession, ChatMode};
 
 /// Represents the full conversation history for a chat session
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,13 +170,101 @@ impl ChatHistory {
         Ok(base_dir.join("chats"))
     }
 
+    /// Sanitize a title for use in filename
+    /// Removes invalid filesystem characters and limits length to 100 chars
+    fn sanitize_filename(title: &str) -> String {
+        let mut sanitized = String::with_capacity(title.len().min(100));
+        
+        for ch in title.chars() {
+            // Invalid filesystem characters: / \ : * ? " < > |
+            if matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                sanitized.push('_');
+            } else if ch.is_whitespace() {
+                sanitized.push('_');
+            } else {
+                sanitized.push(ch);
+            }
+            
+            // Limit to 100 characters
+            if sanitized.len() >= 100 {
+                break;
+            }
+        }
+        
+        // Remove trailing underscores
+        sanitized = sanitized.trim_end_matches('_').to_string();
+        
+        // If empty after sanitization, use default
+        if sanitized.is_empty() {
+            "New_Chat".to_string()
+        } else {
+            sanitized
+        }
+    }
+
+    /// Generate filename from session metadata
+    /// Format: <mode>_<timestamp>_<sanitized-title>.json
+    fn generate_filename(mode: ChatMode, timestamp: &str, title: &str) -> String {
+        let mode_str = match mode {
+            ChatMode::Standard => "standard",
+            ChatMode::PvP => "pvp",
+            ChatMode::Collaborative => "collaborative",
+            ChatMode::Competitive => "competitive",
+            ChatMode::LLMChoice => "llm_choice",
+        };
+        let sanitized_title = Self::sanitize_filename(title);
+        format!("{}_{}_{}.json", mode_str, timestamp, sanitized_title)
+    }
+
+    /// Parse filename to extract metadata
+    /// Returns (mode, timestamp, title) if successful
+    fn parse_filename(filename: &str) -> Option<(ChatMode, String, String)> {
+        // Remove .json extension if present
+        let stem = filename.strip_suffix(".json").unwrap_or(filename);
+        
+        // Split by underscore - format is: mode_timestamp_title
+        // But title may contain underscores, so we need to split carefully
+        let parts: Vec<&str> = stem.split('_').collect();
+        
+        if parts.len() < 3 {
+            return None;
+        }
+        
+        // Check for "llm_choice" mode first (two-word mode)
+        let (mode, timestamp_idx) = if parts.len() >= 3 && parts[0] == "llm" && parts[1] == "choice" {
+            (ChatMode::LLMChoice, 2)
+        } else if parts.len() >= 3 {
+            // Single-word modes
+            let mode = match parts[0] {
+                "standard" => ChatMode::Standard,
+                "pvp" => ChatMode::PvP,
+                "collaborative" => ChatMode::Collaborative,
+                "competitive" => ChatMode::Competitive,
+                _ => return None,
+            };
+            (mode, 1)
+        } else {
+            return None;
+        };
+        
+        // Timestamp is at timestamp_idx
+        let timestamp = parts[timestamp_idx].to_string();
+        
+        // Rest is title (may contain underscores)
+        let title = parts[timestamp_idx + 1..].join("_");
+        
+        Some((mode, timestamp, title))
+    }
+
     /// Get the path to a specific session file
+    /// session_id is now the full filename (without .json extension)
     pub fn session_path(session_id: &str) -> Result<PathBuf, String> {
         Ok(Self::chats_dir()?.join(format!("{}.json", session_id)))
     }
 
-    /// List all saved sessions
-    pub fn list_sessions() -> Result<Vec<SessionData>, String> {
+    /// List all saved sessions by parsing filenames (fast, no file I/O)
+    /// Returns only ChatSession objects, not full SessionData
+    pub fn list_sessions() -> Result<Vec<ChatSession>, String> {
         let chats_dir = Self::chats_dir()?;
         
         if !chats_dir.exists() {
@@ -193,28 +280,44 @@ impl ChatHistory {
             let path = entry.path();
             
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                    // Only accept UUID format
-                    if Uuid::parse_str(file_name).is_ok() {
-                        match Self::load_session_file(&path) {
-                            Ok(session_data) => sessions.push(session_data),
-                            Err(e) => eprintln!("Failed to load session from {:?}: {}", path, e),
-                        }
+                if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
+                    // Parse filename to extract metadata
+                    if let Some((mode, timestamp, title)) = Self::parse_filename(file_name) {
+                        // Create session from filename metadata (no file I/O!)
+                        let session_id = file_name.strip_suffix(".json").unwrap_or(file_name).to_string();
+                        let session = ChatSession {
+                            id: session_id,
+                            title,
+                            mode,
+                            timestamp,
+                        };
+                        sessions.push(session);
                     }
                 }
             }
         }
 
-        // Sort by updated_at descending (most recent first)
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // Sort by timestamp descending (most recent first)
+        sessions.sort_by(|a, b| {
+            // Parse timestamps as numbers for proper sorting
+            let a_ts = a.timestamp.parse::<u64>().unwrap_or(0);
+            let b_ts = b.timestamp.parse::<u64>().unwrap_or(0);
+            b_ts.cmp(&a_ts)
+        });
         
         Ok(sessions)
     }
 
     /// Load a session from disk
+    /// session_id is the filename without .json extension
     pub fn load_session(session_id: &str) -> Result<SessionData, String> {
         let path = Self::session_path(session_id)?;
-        Self::load_session_file(&path)
+        let mut session_data = Self::load_session_file(&path)?;
+        
+        // Update session.id to match filename (in case it was changed)
+        session_data.session.id = session_id.to_string();
+        
+        Ok(session_data)
     }
 
     /// Load a session from a specific file path
@@ -229,7 +332,10 @@ impl ChatHistory {
     }
 
     /// Save a session to disk using atomic write (temp file + rename)
-    pub fn save_session(session_data: &SessionData) -> Result<(), String> {
+    /// The filename is generated from mode, timestamp, and title
+    /// If the title changed, the file will be renamed
+    /// Returns the new session ID (filename without .json) if it changed
+    pub fn save_session(session_data: &SessionData) -> Result<Option<String>, String> {
         let chats_dir = Self::chats_dir()?;
         
         // Create directory if it doesn't exist
@@ -238,10 +344,35 @@ impl ChatHistory {
                 .map_err(|e| format!("Failed to create chats directory: {}", e))?;
         }
 
-        let path = Self::session_path(&session_data.session.id)?;
-        let temp_path = path.with_extension("tmp");
+        // Generate new filename from session data
+        let new_filename = Self::generate_filename(
+            session_data.session.mode,
+            &session_data.updated_at,
+            &session_data.session.title,
+        );
+        let new_session_id = new_filename.strip_suffix(".json").unwrap_or(&new_filename).to_string();
+        let new_path = chats_dir.join(&new_filename);
+        let temp_path = new_path.with_extension("tmp");
         
-        let contents = serde_json::to_string_pretty(session_data)
+        // Check if we need to rename (if session.id doesn't match new filename)
+        let old_filename = format!("{}.json", session_data.session.id);
+        let needs_rename = old_filename != new_filename;
+        
+        if needs_rename {
+            // Title or timestamp changed - need to rename
+            let old_path = chats_dir.join(&old_filename);
+            if old_path.exists() && old_path != new_path {
+                // Delete old file (we'll create new one with correct name)
+                fs::remove_file(&old_path)
+                    .map_err(|e| format!("Failed to remove old session file: {}", e))?;
+            }
+        }
+        
+        // Create updated session data with correct session.id
+        let mut updated_session_data = session_data.clone();
+        updated_session_data.session.id = new_session_id.clone();
+        
+        let contents = serde_json::to_string_pretty(&updated_session_data)
             .map_err(|e| format!("Failed to serialize session: {}", e))?;
 
         // Write to temporary file first
@@ -261,10 +392,15 @@ impl ChatHistory {
         }
 
         // Atomic rename (replaces existing file safely)
-        fs::rename(&temp_path, &path)
+        fs::rename(&temp_path, &new_path)
             .map_err(|e| format!("Failed to rename temporary file to session file: {}", e))?;
 
-        Ok(())
+        // Return new session ID if it changed
+        if needs_rename {
+            Ok(Some(new_session_id))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Delete a session from disk
@@ -279,9 +415,11 @@ impl ChatHistory {
         Ok(())
     }
 
-    /// Generate a unique session ID using UUID v4
-    pub fn generate_session_id() -> String {
-        Uuid::new_v4().to_string()
+    /// Generate a session ID (filename) from mode, timestamp, and title
+    /// Returns the filename without .json extension
+    pub fn generate_session_id(mode: ChatMode, timestamp: &str, title: &str) -> String {
+        let filename = Self::generate_filename(mode, timestamp, title);
+        filename.strip_suffix(".json").unwrap_or(&filename).to_string()
     }
     
     /// Generate a chat summary from the first user message
@@ -366,15 +504,66 @@ impl ChatHistory {
         }
     }
     
+    /// Check if a year is a leap year
+    fn is_leap_year(year: i32) -> bool {
+        (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    }
+
+    /// Get the number of days in a month, accounting for leap years
+    fn days_in_month(month: usize, is_leap: bool) -> u32 {
+        match month {
+            1 => if is_leap { 29 } else { 28 }, // February
+            0 | 2 | 4 | 6 | 7 | 9 | 11 => 31,    // Jan, Mar, May, Jul, Aug, Oct, Dec
+            3 | 5 | 8 | 10 => 30,                // Apr, Jun, Sep, Nov
+            _ => 30,
+        }
+    }
+
+    /// Convert days since epoch to (year, month, day)
+    fn days_to_date(mut days: u64) -> (i32, usize, u32) {
+        // Jan 1, 1970 was a Thursday (day 0)
+        let mut year = 1970i32;
+        
+        // Handle negative days (before epoch) - shouldn't happen with unix timestamps
+        // but handle gracefully
+        if days == 0 {
+            return (year, 0, 1); // Jan 1, 1970
+        }
+        
+        // Calculate year
+        loop {
+            let days_in_year = if Self::is_leap_year(year) { 366 } else { 365 };
+            if days < days_in_year {
+                break;
+            }
+            days -= days_in_year;
+            year += 1;
+        }
+        
+        // Calculate month and day
+        let is_leap = Self::is_leap_year(year);
+        let mut month = 0usize; // 0 = January
+        let mut day = days as u32;
+        
+        while month < 12 {
+            let days_in_this_month = Self::days_in_month(month, is_leap);
+            if day < days_in_this_month {
+                break;
+            }
+            day -= days_in_this_month;
+            month += 1;
+        }
+        
+        // day is 0-indexed, so add 1
+        (year, month, day + 1)
+    }
+
     /// Format timestamp as "Sat, 12th Dec" format
     pub fn format_timestamp_date(timestamp: &str) -> String {
         // Try to parse as unix timestamp
         if let Ok(secs) = timestamp.parse::<u64>() {
-            use std::time::{SystemTime, UNIX_EPOCH, Duration};
-            let datetime = UNIX_EPOCH + Duration::from_secs(secs);
+            use std::time::{SystemTime, UNIX_EPOCH};
             
-            // Convert to chrono-compatible format
-            // We'll use a simple manual approach to avoid adding chrono dependency
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -394,22 +583,17 @@ impl ChatHistory {
                 format!("{} days ago", days_diff)
             } else {
                 // For older dates, format as "Day, Nth Month"
-                // This is a simplified version - for full date formatting, consider adding chrono
                 let weekday_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
                 let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
                 
-                // Calculate day of week (simplified - Jan 1, 1970 was a Thursday)
-                let day_of_week = (days_since_epoch + 4) % 7;
-                let weekday = weekday_names[day_of_week as usize];
+                // Calculate day of week (Jan 1, 1970 was a Thursday = 4)
+                let day_of_week = ((days_since_epoch + 4) % 7) as usize;
+                let weekday = weekday_names[day_of_week];
                 
-                // Approximate month and day (simplified calculation)
-                // This is a rough approximation - for accuracy, use chrono
-                let year = 1970 + (days_since_epoch / 365);
-                let day_of_year = days_since_epoch % 365;
-                let month_idx = (day_of_year / 30).min(11);
-                let month = month_names[month_idx as usize];
-                let day = (day_of_year % 30) + 1;
+                // Calculate accurate date
+                let (_year, month, day) = Self::days_to_date(days_since_epoch);
+                let month_name = month_names[month];
                 
                 // Add ordinal suffix
                 let suffix = match day {
@@ -419,7 +603,7 @@ impl ChatHistory {
                     _ => "th",
                 };
                 
-                format!("{}, {}{} {}", weekday, day, suffix, month)
+                format!("{}, {}{} {}", weekday, day, suffix, month_name)
             }
         } else {
             timestamp.to_string()

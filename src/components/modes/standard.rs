@@ -168,12 +168,19 @@ pub fn Standard(props: StandardProps) -> Element {
                     match client.stream_chat_completion(model_id.clone(), messages).await {
                         Ok(mut stream) => {
                             let mut content = String::new();
+                            let mut last_update = std::time::Instant::now();
                             while let Some(event) = stream.next().await {
                                 match event {
                                     StreamEvent::Content(chunk) => {
                                         content.push_str(&chunk);
                                         let mut responses = current_streaming_responses_clone.write();
                                         responses.insert(model_id.clone(), content.clone());
+                                        
+                                        // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                        if last_update.elapsed().as_millis() >= 16 {
+                                            tokio::task::yield_now().await;
+                                            last_update = std::time::Instant::now();
+                                        }
                                     }
                                     StreamEvent::Done => {
                                         final_results.insert(model_id.clone(), (content.clone(), None));
@@ -207,12 +214,19 @@ pub fn Standard(props: StandardProps) -> Element {
                         match client.stream_chat_completion(model_id.clone(), messages).await {
                             Ok(mut stream) => {
                                 let mut content = String::new();
+                                let mut last_update = std::time::Instant::now();
                                 while let Some(event) = stream.next().await {
                                     match event {
                                         StreamEvent::Content(chunk) => {
                                             content.push_str(&chunk);
                                             let mut responses = current_streaming_responses_clone.write();
                                             responses.insert(model_id.clone(), content.clone());
+                                            
+                                            // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                            if last_update.elapsed().as_millis() >= 16 {
+                                                tokio::task::yield_now().await;
+                                                last_update = std::time::Instant::now();
+                                            }
                                         }
                                         StreamEvent::Done => {
                                             final_results.insert(model_id.clone(), (content.clone(), None));

@@ -277,6 +277,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                         let mut done_models = std::collections::HashSet::new();
                         let mut phase1_results: HashMap<String, ModelResponse> = HashMap::new();
 
+                        let mut last_update = std::time::Instant::now();
                         while let Some(event) = rx.recv().await {
                             let model_id = event.model_id.clone();
 
@@ -287,6 +288,12 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                         .entry(model_id.clone())
                                         .and_modify(|s| s.push_str(&content))
                                         .or_insert(content);
+                                    
+                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                    if last_update.elapsed().as_millis() >= 16 {
+                                        tokio::task::yield_now().await;
+                                        last_update = std::time::Instant::now();
+                                    }
                                 }
                                 StreamEvent::Done => {
                                     let final_content = current_streaming_clone
@@ -368,6 +375,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                 match client.stream_chat_completion(model_id.clone(), review_messages).await {
                                     Ok(mut stream) => {
                                         let mut review_content = String::new();
+                                        let mut last_update = std::time::Instant::now();
 
                                         while let Some(event) = stream.next().await {
                                             match event {
@@ -377,6 +385,12 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                         model_id.clone(),
                                                         review_content.clone(),
                                                     );
+                                                    
+                                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                                    if last_update.elapsed().as_millis() >= 16 {
+                                                        tokio::task::yield_now().await;
+                                                        last_update = std::time::Instant::now();
+                                                    }
                                                 }
                                                 StreamEvent::Done => {
                                                     phase2_results.push(ModelResponse {
@@ -453,6 +467,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                             match client.stream_chat_completion(synthesizer_id.clone(), consensus_messages).await {
                                 Ok(mut stream) => {
                                     let mut consensus_content = String::new();
+                                    let mut last_update = std::time::Instant::now();
 
                                     while let Some(event) = stream.next().await {
                                         match event {
@@ -462,6 +477,12 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                     "consensus".to_string(),
                                                     consensus_content.clone(),
                                                 );
+                                                
+                                                // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                                if last_update.elapsed().as_millis() >= 16 {
+                                                    tokio::task::yield_now().await;
+                                                    last_update = std::time::Instant::now();
+                                                }
                                             }
                                             StreamEvent::Done => {
                                                 if let Some(last_round) = conversation_history_clone.write().last_mut() {

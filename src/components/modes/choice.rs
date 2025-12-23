@@ -436,6 +436,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                         let mut done_models = std::collections::HashSet::new();
                         let mut decision_responses: HashMap<String, String> = HashMap::new();
 
+                        let mut last_update = std::time::Instant::now();
                         while let Some(event) = rx.recv().await {
                             let model_id = event.model_id.clone();
 
@@ -446,6 +447,12 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                         .entry(model_id.clone())
                                         .and_modify(|s| s.push_str(&content))
                                         .or_insert(content);
+                                    
+                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                    if last_update.elapsed().as_millis() >= 16 {
+                                        tokio::task::yield_now().await;
+                                        last_update = std::time::Instant::now();
+                                    }
                                 }
                                 StreamEvent::Done => {
                                     let final_content = current_streaming_clone
@@ -1276,6 +1283,7 @@ async fn execute_collaborative(
 
     if let Ok(mut rx) = client.stream_chat_completion_multi(models.to_vec(), messages).await {
         let mut done_models = std::collections::HashSet::new();
+        let mut last_update = std::time::Instant::now();
 
         while let Some(event) = rx.recv().await {
             let model_id = event.model_id.clone();
@@ -1287,6 +1295,12 @@ async fn execute_collaborative(
                         .entry(model_id.clone())
                         .and_modify(|s| s.push_str(&content))
                         .or_insert(content);
+                    
+                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                    if last_update.elapsed().as_millis() >= 16 {
+                        tokio::task::yield_now().await;
+                        last_update = std::time::Instant::now();
+                    }
                 }
                 StreamEvent::Done => {
                     let final_content = current_streaming
@@ -1474,6 +1488,7 @@ async fn execute_competitive(
     let mut phase1_results: HashMap<String, ModelProposal> = HashMap::new();
 
     if let Ok(mut rx) = client.stream_chat_completion_multi(models.to_vec(), messages).await {
+        let mut last_update = std::time::Instant::now();
         while let Some(event) = rx.recv().await {
             let model_id = event.model_id.clone();
 
@@ -1484,6 +1499,12 @@ async fn execute_competitive(
                         .entry(model_id.clone())
                         .and_modify(|s| s.push_str(&content))
                         .or_insert(content);
+                    
+                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                    if last_update.elapsed().as_millis() >= 16 {
+                        tokio::task::yield_now().await;
+                        last_update = std::time::Instant::now();
+                    }
                 }
                 StreamEvent::Done => {
                     let final_content = current_streaming.read().get(&model_id).cloned().unwrap_or_default();

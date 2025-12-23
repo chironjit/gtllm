@@ -267,6 +267,7 @@ pub fn PvP(props: PvPProps) -> Element {
                         let mut done_bots = std::collections::HashSet::new();
 
                         // Collect bot responses
+                        let mut last_update = std::time::Instant::now();
                         while let Some(event) = rx.recv().await {
                             let model_id = event.model_id.clone();
 
@@ -277,6 +278,12 @@ pub fn PvP(props: PvPProps) -> Element {
                                         .entry(model_id.clone())
                                         .and_modify(|s| s.push_str(&content))
                                         .or_insert(content);
+                                    
+                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                    if last_update.elapsed().as_millis() >= 16 {
+                                        tokio::task::yield_now().await;
+                                        last_update = std::time::Instant::now();
+                                    }
                                 }
                                 StreamEvent::Done => {
                                     done_bots.insert(model_id);
@@ -344,12 +351,19 @@ pub fn PvP(props: PvPProps) -> Element {
                                             match client.stream_chat_completion(mod_id.clone(), moderator_messages).await {
                                                 Ok(mut stream) => {
                                                     let mut mod_content = String::new();
+                                                    let mut last_update = std::time::Instant::now();
 
                                                     while let Some(event) = stream.next().await {
                                                         match event {
                                                             StreamEvent::Content(content) => {
                                                                 mod_content.push_str(&content);
                                                                 current_moderator_response_clone.set(mod_content.clone());
+                                                                
+                                                                // Yield to UI thread every ~16ms (60fps) to prevent blocking
+                                                                if last_update.elapsed().as_millis() >= 16 {
+                                                                    tokio::task::yield_now().await;
+                                                                    last_update = std::time::Instant::now();
+                                                                }
                                                             }
                                                             StreamEvent::Done => {
                                                                 // Update the last conversation round with moderator response
