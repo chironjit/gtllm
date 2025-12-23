@@ -1,7 +1,9 @@
+use crate::utils::Theme;
 use dioxus::prelude::*;
 
 #[component]
 pub fn ModelResponseCard(
+    theme: Signal<Theme>,
     model_id: String,
     content: String,
     error_message: Option<String>,
@@ -42,8 +44,11 @@ pub fn ModelResponseCard(
                 }
             } else {
                 div {
-                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap break-words",
-                    "{content}"
+                    class: "text-sm text-[var(--color-base-content)] break-words",
+                    super::FormattedText {
+                        theme,
+                        content: content.clone(),
+                    }
                 }
             }
         }

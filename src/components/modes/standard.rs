@@ -1,4 +1,4 @@
-use super::common::{ChatInput, Modal, ModelSelector};
+use super::common::{ChatInput, FormattedText, Modal, ModelSelector};
 use crate::utils::{ChatMessage, ChatHistory, ChatMode, ChatSession, InputSettings, OpenRouterClient, SessionData, StandardHistory, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
@@ -412,7 +412,10 @@ pub fn Standard(props: StandardProps) -> Element {
                                         class: "flex justify-end mb-4",
                                         div {
                                             class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
-                                            "{user_msg}"
+                                            FormattedText {
+                                                theme,
+                                                content: user_msg.clone(),
+                                            }
                                         }
                                     }
 
@@ -453,8 +456,10 @@ pub fn Standard(props: StandardProps) -> Element {
                                                         }
                                                     } else {
                                                         div {
-                                                            class: "whitespace-pre-wrap",
-                                                            "{responses[0].content}"
+                                                            FormattedText {
+                                                                theme,
+                                                                content: responses[0].content.clone(),
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -496,8 +501,11 @@ pub fn Standard(props: StandardProps) -> Element {
                                                             }
                                                         } else {
                                                             div {
-                                                                class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                                "{response.content}"
+                                                                class: "text-sm text-[var(--color-base-content)]",
+                                                                FormattedText {
+                                                                    theme,
+                                                                    content: response.content.clone(),
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -526,8 +534,10 @@ pub fn Standard(props: StandardProps) -> Element {
                                                         }
                                                     }
                                                     div {
-                                                        class: "whitespace-pre-wrap",
-                                                        "{streaming_responses.get(&models[0]).cloned().unwrap_or_default()}"
+                                                        FormattedText {
+                                                            theme,
+                                                            content: streaming_responses.get(&models[0]).cloned().unwrap_or_default(),
+                                                        }
                                                     }
                                                 }
                                             }
@@ -547,8 +557,11 @@ pub fn Standard(props: StandardProps) -> Element {
                                                             }
                                                         }
                                                         div {
-                                                            class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
-                                                            "{streaming_responses.get(model_id).cloned().unwrap_or_default()}"
+                                                            class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
+                                                            FormattedText {
+                                                                theme,
+                                                                content: streaming_responses.get(model_id).cloned().unwrap_or_default(),
+                                                            }
                                                         }
                                                     }
                                                 }

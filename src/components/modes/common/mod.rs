@@ -11,7 +11,7 @@ mod streaming_indicator;
 mod vote_display;
 mod vote_tally;
 
-pub use chat::ChatDisplay;
+pub use chat::{ChatDisplay, FormattedText};
 pub use input::ChatInput;
 pub use modal::Modal;
 pub use model_response_card::ModelResponseCard;

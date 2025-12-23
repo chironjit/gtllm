@@ -1,4 +1,4 @@
-use super::common::{ChatInput, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, VoteDisplay, VoteTally, VoteTallyProps};
+use super::common::{ChatInput, FormattedText, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, VoteDisplay, VoteTally, VoteTallyProps};
 use crate::utils::{ChatMessage, ChatHistory, ChatMode, ChatSession, CompetitiveHistory, InputSettings, Model, OpenRouterClient, SessionData, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
@@ -873,7 +873,10 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                     class: "flex justify-end",
                                     div {
                                         class: "max-w-2xl p-4 rounded-lg bg-[var(--color-primary)] text-[var(--color-primary-content)]",
-                                        "{round.user_question}"
+                                        FormattedText {
+                                            theme,
+                                            content: round.user_question.clone(),
+                                        }
                                     }
                                 }
 
@@ -890,6 +893,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
 
                                         for proposal in round.phase1_proposals.iter() {
                                             ModelResponseCard {
+                                                theme,
                                                 model_id: proposal.model_id.clone(),
                                                 content: proposal.content.clone(),
                                                 error_message: proposal.error_message.clone(),
@@ -966,6 +970,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
 
                                                             rsx! {
                                                                 ModelResponseCard {
+                                                                    theme,
                                                                     model_id: model_id.clone(),
                                                                     content,
                                                                     error_message: None,

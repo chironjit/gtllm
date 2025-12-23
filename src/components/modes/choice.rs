@@ -1,4 +1,4 @@
-use super::common::{ChatInput, Modal, ModelSelector, ModelResponseCard};
+use super::common::{ChatInput, FormattedText, Modal, ModelSelector, ModelResponseCard};
 use crate::utils::{ChatHistory, ChatMessage, ChatMode, ChatSession, InputSettings, OpenRouterClient, SessionData, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::StreamExt;
@@ -819,7 +819,10 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                         class: "flex justify-end mb-4",
                                         div {
                                             class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
-                                            "{round.user_question}"
+                                            FormattedText {
+                                                theme,
+                                                content: round.user_question.clone(),
+                                            }
                                         }
                                     }
 
@@ -946,6 +949,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         class: "grid grid-cols-1 md:grid-cols-2 gap-3",
                                                         for response in collab.phase1_responses.iter() {
                                                             ModelResponseCard {
+                                                                theme,
                                                                 model_id: response.model_id.clone(),
                                                                 content: response.content.clone(),
                                                                 error_message: response.error_message.clone(),
@@ -968,6 +972,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         class: "grid grid-cols-1 md:grid-cols-2 gap-3",
                                                         for review in collab.phase2_reviews.iter() {
                                                             ModelResponseCard {
+                                                                theme,
                                                                 model_id: review.model_id.clone(),
                                                                 content: review.content.clone(),
                                                                 error_message: review.error_message.clone(),
@@ -993,8 +998,11 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         }
                                                     } else {
                                                         div {
-                                                            class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                            "{consensus.content}"
+                                                            class: "text-sm text-[var(--color-base-content)]",
+                                                            FormattedText {
+                                                                theme,
+                                                                content: consensus.content.clone(),
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1026,6 +1034,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         class: "grid grid-cols-1 md:grid-cols-2 gap-3",
                                                         for proposal in comp.phase1_proposals.iter() {
                                                             ModelResponseCard {
+                                                                theme,
                                                                 model_id: proposal.model_id.clone(),
                                                                 content: proposal.content.clone(),
                                                                 error_message: proposal.error_message.clone(),

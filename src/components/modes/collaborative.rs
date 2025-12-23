@@ -1,4 +1,4 @@
-use super::common::{ChatInput, PromptCard, PromptEditorModal, PromptType};
+use super::common::{ChatInput, FormattedText, PromptCard, PromptEditorModal, PromptType};
 use crate::utils::{
     ChatHistory, ChatMessage, ChatMode, ChatSession, InputSettings, Model, OpenRouterClient, SessionData, StreamEvent, Theme,
 };
@@ -902,7 +902,10 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                         class: "flex justify-end mb-4",
                                         div {
                                             class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
-                                            "{round.user_question}"
+                                            FormattedText {
+                                                theme,
+                                                content: round.user_question.clone(),
+                                            }
                                         }
                                     }
 
@@ -945,8 +948,11 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                             }
                                                         } else {
                                                             div {
-                                                                class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                                "{response.content}"
+                                                                class: "text-sm text-[var(--color-base-content)]",
+                                                                FormattedText {
+                                                                    theme,
+                                                                    content: response.content.clone(),
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -992,8 +998,11 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                             }
                                                         } else {
                                                             div {
-                                                                class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                                "{review.content}"
+                                                                class: "text-sm text-[var(--color-base-content)]",
+                                                                FormattedText {
+                                                                    theme,
+                                                                    content: review.content.clone(),
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1034,8 +1043,11 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                     }
                                                 } else {
                                                     div {
-                                                        class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                        "{consensus.content}"
+                                                        class: "text-sm text-[var(--color-base-content)]",
+                                                        FormattedText {
+                                                            theme,
+                                                            content: consensus.content.clone(),
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1089,8 +1101,11 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                 }
 
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
-                                                    "{content}"
+                                                    class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
+                                                    FormattedText {
+                                                        theme,
+                                                        content: content.clone(),
+                                                    }
                                                 }
                                             }
                                         }

@@ -1,4 +1,4 @@
-use super::common::{ChatInput, Modal};
+use super::common::{ChatInput, FormattedText, Modal};
 use crate::utils::{ChatMessage, ChatHistory, ChatMode, ChatSession, InputSettings, Model, OpenRouterClient, PvPHistory, SessionData, StreamEvent, Theme};
 use dioxus::prelude::*;
 use futures::stream::StreamExt;
@@ -865,7 +865,10 @@ pub fn PvP(props: PvPProps) -> Element {
                                         class: "flex justify-end mb-4",
                                         div {
                                             class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
-                                            "{round.user_message}"
+                                            FormattedText {
+                                                theme,
+                                                content: round.user_message.clone(),
+                                            }
                                         }
                                     }
 
@@ -891,8 +894,11 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 }
                                             } else {
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                    "{round.bot1_response.content}"
+                                                    class: "text-sm text-[var(--color-base-content)]",
+                                                    FormattedText {
+                                                        theme,
+                                                        content: round.bot1_response.content.clone(),
+                                                    }
                                                 }
                                             }
                                         }
@@ -915,8 +921,11 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 }
                                             } else {
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                    "{round.bot2_response.content}"
+                                                    class: "text-sm text-[var(--color-base-content)]",
+                                                    FormattedText {
+                                                        theme,
+                                                        content: round.bot2_response.content.clone(),
+                                                    }
                                                 }
                                             }
                                         }
@@ -941,8 +950,11 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 }
                                             } else {
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap",
-                                                    "{judgment.content}"
+                                                    class: "text-sm text-[var(--color-base-content)]",
+                                                    FormattedText {
+                                                        theme,
+                                                        content: judgment.content.clone(),
+                                                    }
                                                 }
                                             }
                                         }
@@ -968,8 +980,11 @@ pub fn PvP(props: PvPProps) -> Element {
                                                     }
                                                 }
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
-                                                    "{current_bot_responses.read().get(&bot_models.read()[0]).cloned().unwrap_or_default()}"
+                                                    class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
+                                                    FormattedText {
+                                                        theme,
+                                                        content: current_bot_responses.read().get(&bot_models.read()[0]).cloned().unwrap_or_default(),
+                                                    }
                                                 }
                                             }
 
@@ -984,8 +999,11 @@ pub fn PvP(props: PvPProps) -> Element {
                                                     }
                                                 }
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
-                                                    "{current_bot_responses.read().get(&bot_models.read()[1]).cloned().unwrap_or_default()}"
+                                                    class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
+                                                    FormattedText {
+                                                        theme,
+                                                        content: current_bot_responses.read().get(&bot_models.read()[1]).cloned().unwrap_or_default(),
+                                                    }
                                                 }
                                             }
                                         }
@@ -1002,8 +1020,11 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 }
                                             }
                                             div {
-                                                class: "text-sm text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
-                                                "{current_moderator_response}"
+                                                class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
+                                                FormattedText {
+                                                    theme,
+                                                    content: current_moderator_response.clone(),
+                                                }
                                             }
                                         }
                                     }
