@@ -17,13 +17,13 @@ pub fn ModelResponseCard(
 
     rsx! {
         div {
-            class: "p-4 rounded-lg border-2 {border_color} bg-[var(--color-base-100)]",
+            class: "p-3 sm:p-4 rounded-lg border-2 {border_color} bg-[var(--color-base-100)] h-full flex flex-col",
 
             // Model ID header
             div {
                 class: "flex items-center justify-between mb-2",
                 div {
-                    class: "font-mono text-sm font-semibold text-[var(--color-primary)]",
+                    class: "font-mono text-xs sm:text-sm font-semibold text-[var(--color-primary)]",
                     "{model_id}"
                 }
                 if is_streaming {
@@ -39,15 +39,22 @@ pub fn ModelResponseCard(
             // Content or error
             if let Some(error) = error_message {
                 div {
-                    class: "text-sm text-red-600 font-medium",
+                    class: "text-sm sm:text-base text-red-600 font-medium",
                     "Error: {error}"
                 }
             } else {
-                div {
-                    class: "text-sm text-[var(--color-base-content)] break-words",
-                    super::FormattedText {
-                        theme,
-                        content: content.clone(),
+                if is_streaming {
+                    div {
+                        class: "text-sm sm:text-base text-[var(--color-base-content)] break-words flex-1 whitespace-pre-wrap",
+                        "{content}"
+                    }
+                } else {
+                    div {
+                        class: "text-sm sm:text-base text-[var(--color-base-content)] break-words flex-1",
+                        super::FormattedText {
+                            theme,
+                            content: content.clone(),
+                        }
                     }
                 }
             }

@@ -233,12 +233,20 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
     let mut editing_prompt_type = use_signal(|| CompetitivePromptType::Proposal);
     let mut temp_prompt = use_signal(String::new);
     
-    // Load history if session_id is provided
+    // Track the currently loaded session to avoid reloading on every render
+    let mut loaded_session_id = use_signal(|| None::<String>);
+    
+    // Load history if session_id changes (not on every render)
     let session_id_for_load = session_id.clone();
-    use_hook(|| {
-        if let Some(sid) = session_id_for_load {
-            if let Ok(session_data) = ChatHistory::load_session(&sid) {
-                if let ChatHistory::Competitive(history) = session_data.history {
+    let should_load = session_id_for_load != *loaded_session_id.read();
+    
+    if should_load {
+        loaded_session_id.set(session_id_for_load.clone());
+        
+        if let Some(sid) = session_id_for_load.clone() {
+            match ChatHistory::load_session(&sid) {
+                Ok(session_data) => {
+                    if let ChatHistory::Competitive(history) = session_data.history {
                     let selected_models_clone = history.selected_models.clone();
                     selected_models.set(selected_models_clone.clone());
                     prompt_templates.set(PromptTemplates {
@@ -247,21 +255,21 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     });
                     
                     // Convert rounds from history to internal format
-                    let converted_rounds: Vec<CompetitiveRound> = history.rounds
-                        .into_iter()
-                        .map(|r| CompetitiveRound {
-                            user_question: r.user_question,
-                            phase1_proposals: r.phase1_proposals.into_iter()
-                                .map(|p| ModelProposal {
-                                    model_id: p.model_id,
-                                    content: p.content,
-                                    error_message: p.error_message,
-                                })
-                                .collect(),
-                            phase2_votes: r.phase2_votes.into_iter()
-                                .map(|v| ModelVote {
-                                    voter_id: v.voter_id,
-                                    voted_for: v.voted_for,
+                        let converted_rounds: Vec<CompetitiveRound> = history.rounds
+                            .into_iter()
+                            .map(|r| CompetitiveRound {
+                                user_question: r.user_question,
+                                phase1_proposals: r.phase1_proposals.into_iter()
+                                    .map(|p| ModelProposal {
+                                        model_id: p.model_id,
+                                        content: p.content,
+                                        error_message: p.error_message,
+                                    })
+                                    .collect(),
+                                phase2_votes: r.phase2_votes.into_iter()
+                                    .map(|v| ModelVote {
+                                        voter_id: v.voter_id,
+                                        voted_for: v.voted_for,
                                     raw_response: v.raw_response,
                                     error_message: v.error_message,
                                 })
@@ -273,26 +281,40 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                     voters: t.voters,
                                 })
                                 .collect(),
-                            winners: r.winners,
-                            current_phase: match r.current_phase.as_str() {
-                                "proposal" => CompetitivePhase::Proposal,
-                                "voting" => CompetitivePhase::Voting,
-                                "tallying" => CompetitivePhase::Tallying,
-                                "complete" => CompetitivePhase::Complete,
-                                _ => CompetitivePhase::Complete,
-                            },
-                        })
-                        .collect();
-                    conversation_history.set(converted_rounds);
-                    
-                    // If models are loaded, go to chat step
-                    if !selected_models_clone.is_empty() {
-                        selection_step.set(1);
+                                winners: r.winners,
+                                current_phase: match r.current_phase.as_str() {
+                                    "proposal" => CompetitivePhase::Proposal,
+                                    "voting" => CompetitivePhase::Voting,
+                                    "tallying" => CompetitivePhase::Tallying,
+                                    "complete" => CompetitivePhase::Complete,
+                                    _ => CompetitivePhase::Complete,
+                                },
+                            })
+                            .collect();
+                        conversation_history.set(converted_rounds);
+                        
+                        // If models are loaded, go to chat step
+                        if !selected_models_clone.is_empty() {
+                            selection_step.set(1);
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("Failed to load session {}: {}", sid, e);
+                    selected_models.set(Vec::new());
+                    conversation_history.set(Vec::new());
+                    prompt_templates.set(PromptTemplates::default());
+                    selection_step.set(0);
+                }
             }
+        } else {
+            // New session - reset state
+            selected_models.set(Vec::new());
+            conversation_history.set(Vec::new());
+            prompt_templates.set(PromptTemplates::default());
+            selection_step.set(0);
         }
-    });
+    }
 
     // Search state for model selection
     let mut search_query = use_signal(|| String::new());
@@ -366,30 +388,51 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             current_phase_clone.set(CompetitivePhase::Proposal);
 
             let proposal_prompt = templates.proposal.replace("{user_question}", &user_msg);
-            let messages = vec![ChatMessage::user(proposal_prompt)];
+            let messages = vec![
+                ChatMessage::system("You are in a competitive evaluation workflow. Follow the phase instructions exactly.".to_string()),
+                ChatMessage::user(proposal_prompt),
+            ];
 
             let mut phase1_results: HashMap<String, ModelProposal> = HashMap::new();
 
             match client.stream_chat_completion_multi(models.clone(), messages).await {
                 Ok(mut rx) => {
+                    // Buffer content locally to throttle updates
+                    let mut content_buffer: HashMap<String, String> = HashMap::new();
                     let mut last_update = std::time::Instant::now();
+                    const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
+
                     while let Some(event) = rx.recv().await {
                         let model_id = event.model_id.clone();
 
                         match event.event {
                             StreamEvent::Content(content) => {
-                                current_streaming_clone.write()
+                                // Accumulate in buffer instead of writing immediately
+                                content_buffer
                                     .entry(model_id.clone())
                                     .and_modify(|s| s.push_str(&content))
                                     .or_insert(content);
                                 
-                                // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                if last_update.elapsed().as_millis() >= 16 {
-                                    tokio::task::yield_now().await;
-                                    last_update = std::time::Instant::now();
-                                }
+                                    // Throttle updates: only write to signal every 16ms
+                                    if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                        // Flush only the active model to reduce cloning work.
+                                        if let Some(accumulated) = content_buffer.get(&model_id) {
+                                            current_streaming_clone
+                                                .write()
+                                                .insert(model_id.clone(), accumulated.clone());
+                                        }
+                                        
+                                        last_update = std::time::Instant::now();
+                                    }
                             }
                             StreamEvent::Done => {
+                                // Flush any remaining buffered content before marking done
+                                if let Some(accumulated) = content_buffer.remove(&model_id) {
+                                    let mut responses = current_streaming_clone.write();
+                                    responses.insert(model_id.clone(), accumulated.clone());
+                                    drop(responses);
+                                }
+                                
                                 let final_content = current_streaming_clone.read().get(&model_id).cloned().unwrap_or_default();
                                 phase1_results.insert(model_id.clone(), ModelProposal {
                                     model_id: model_id.clone(),
@@ -460,7 +503,10 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     .replace("{all_proposals}", &all_proposals_text)
                     .replace("{your_proposal}", &my_proposal.content);
 
-                let messages = vec![ChatMessage::user(voting_prompt)];
+                let messages = vec![
+                    ChatMessage::system("You are in a competitive evaluation workflow. Follow the phase instructions exactly.".to_string()),
+                    ChatMessage::user(voting_prompt),
+                ];
 
                 current_streaming_clone.write().clear();
 
@@ -468,21 +514,29 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     Ok(mut rx) => {
                         let mut vote_response = String::new();
 
+                        // Throttle updates: only write to signal every 16ms
                         let mut last_update = std::time::Instant::now();
+                        const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
+                        
                         while let Some(event) = rx.next().await {
                             match event {
                                 StreamEvent::Content(content) => {
                                     vote_response.push_str(&content);
-                                    current_streaming_clone.write().insert(model_id.clone(), vote_response.clone());
                                     
-                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                    if last_update.elapsed().as_millis() >= 16 {
-                                        tokio::task::yield_now().await;
+                                    // Throttle updates: only write to signal every 16ms
+                                    if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                        current_streaming_clone.write().insert(model_id.clone(), vote_response.clone());
+                                        
                                         last_update = std::time::Instant::now();
                                     }
                                 }
                                 StreamEvent::Done => {
-                                    current_streaming_clone.write().remove(model_id);
+                                    // Flush final content and remove from streaming
+                                    {
+                                        let mut responses = current_streaming_clone.write();
+                                        responses.insert(model_id.clone(), vote_response.clone());
+                                        responses.remove(model_id.as_str());
+                                    }
 
                                     let valid_model_ids: Vec<String> = successful_proposals.iter()
                                         .map(|p| p.model_id.clone())
@@ -595,7 +649,8 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                 let session_data = SessionData {
                     session,
                     history: ChatHistory::Competitive(history),
-                    created_at: ChatHistory::format_timestamp(),
+                    created_at: ChatHistory::session_timestamp_from_id(&sid)
+                        .unwrap_or_else(ChatHistory::format_timestamp),
                     updated_at: ChatHistory::format_timestamp(),
                 };
                 
@@ -669,7 +724,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
 
                     // Model list
                     div {
-                        class: "flex-1 overflow-y-auto p-4",
+                        class: "flex-1 min-h-0 overflow-y-auto p-4",
 
                         if loading {
                             div {
@@ -843,7 +898,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                 
                 // Chat interface
                 div {
-                    class: "flex-1 overflow-y-auto p-4",
+                    class: "flex-1 min-h-0 overflow-y-auto p-4",
 
                     if conversation_history.read().is_empty() && !*is_processing.read() {
                         // Empty state
@@ -875,7 +930,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                     } else {
                         // Conversation display
                         div {
-                            class: "space-y-6 max-w-6xl mx-auto",
+                            class: "space-y-6 w-full",
 
                         // Render each round
                         for round in conversation_history.read().iter() {
@@ -886,7 +941,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                 div {
                                     class: "flex justify-end",
                                     div {
-                                        class: "max-w-2xl p-4 rounded-lg bg-[var(--color-primary)] text-[var(--color-primary-content)]",
+                                        class: "max-w-2xl p-3 sm:p-4 md:p-5 rounded-lg bg-[var(--color-primary)] text-[var(--color-primary-content)] text-sm sm:text-base",
                                         FormattedText {
                                             theme,
                                             content: round.user_question.clone(),

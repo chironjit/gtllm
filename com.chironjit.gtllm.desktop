@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=GTLLM
+GenericName=Game Theory LLM Chat
+Comment=Multi-LLM chat application with game theory inspired modes
+Exec=gtllm
+Icon=com.chironjit.gtllm
+Terminal=false
+Categories=Network;Chat;
+Keywords=llm;ai;chat;game theory;openrouter;
+StartupNotify=true
+MimeType=

@@ -1,0 +1,38 @@
+app-id: com.chironjit.gtllm
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: gtllm
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=x11
+  - --socket=fallback-x11
+  - --device=dri
+  - --talk-name=org.freedesktop.Flatpak
+  - --filesystem=home
+  - --filesystem=xdg-config
+modules:
+  - name: gtllm
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --features desktop
+      - install -Dm755 target/release/gtllm /app/bin/gtllm
+    sources:
+      # TODO: Replace with your actual git repository URL and tag/commit
+      - type: git
+        url: https://github.com/chironjit/gtllm.git
+        tag: v0.1.0
+        # commit: abc123...  # Use either tag or commit, not both
+    post-install:
+      - install -Dm644 com.chironjit.gtllm.desktop /app/share/applications/com.chironjit.gtllm.desktop
+      - install -Dm644 com.chironjit.gtllm.appdata.xml /app/share/metainfo/com.chironjit.gtllm.appdata.xml
+      - |
+        if [ -f com.chironjit.gtllm.svg ]; then
+          install -Dm644 com.chironjit.gtllm.svg /app/share/icons/hicolor/scalable/apps/com.chironjit.gtllm.svg
+        fi
+        if [ -f com.chironjit.gtllm.png ]; then
+          install -Dm644 com.chironjit.gtllm.png /app/share/icons/hicolor/512x512/apps/com.chironjit.gtllm.png
+        fi

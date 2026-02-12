@@ -10,6 +10,39 @@ struct ModelResponse {
     model_id: String,
     content: String,
     error_message: Option<String>,
+    metrics: Option<ResponseMetrics>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResponseMetrics {
+    request_sent_at: std::time::Instant,
+    first_token_at: Option<std::time::Instant>,
+    completed_at: Option<std::time::Instant>,
+}
+
+impl ResponseMetrics {
+    fn time_to_first_token(&self) -> Option<std::time::Duration> {
+        self.first_token_at.map(|ft| ft.duration_since(self.request_sent_at))
+    }
+    
+    fn total_time(&self) -> Option<std::time::Duration> {
+        self.completed_at.map(|ct| ct.duration_since(self.request_sent_at))
+    }
+    
+    fn format_duration(duration: std::time::Duration) -> String {
+        let millis = duration.as_millis();
+        if millis < 1000 {
+            format!("{}ms", millis)
+        } else {
+            let secs = duration.as_secs_f64();
+            if secs < 60.0 {
+                format!("{:.2}s", secs)
+            } else {
+                let mins = secs / 60.0;
+                format!("{:.1}m", mins)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,7 +63,9 @@ pub struct StandardProps {
 
 impl PartialEq for StandardProps {
     fn eq(&self, other: &Self) -> bool {
-        self.theme == other.theme && self.input_settings == other.input_settings
+        self.theme == other.theme 
+            && self.input_settings == other.input_settings
+            && self.session_id == other.session_id
         // Skip client comparison
     }
 }
@@ -45,7 +80,13 @@ pub fn Standard(props: StandardProps) -> Element {
     let mut selected_models = use_signal(|| Vec::<String>::new());
     let mut user_messages = use_signal(|| Vec::<String>::new());
     let mut model_responses = use_signal(|| Vec::<Vec<ModelResponse>>::new());
-    let mut current_streaming_responses = use_signal(|| HashMap::<String, String>::new());
+    #[derive(Clone, Debug)]
+    struct StreamingResponse {
+        content: String,
+        metrics: ResponseMetrics,
+    }
+    
+    let mut current_streaming_responses = use_signal(|| HashMap::<String, StreamingResponse>::new());
     let mut is_streaming = use_signal(|| false);
     
     // System prompt state
@@ -59,40 +100,71 @@ pub fn Standard(props: StandardProps) -> Element {
         multi_model: HashMap::new(),
     });
     
-    // Load history if session_id is provided
+    // Track the currently loaded session to avoid reloading on every render
+    let mut loaded_session_id = use_signal(|| None::<String>);
+    
+    // Load history if session_id changes (not on every render)
     let session_id = props.session_id.clone();
-    use_hook(|| {
-        if let Some(sid) = session_id {
-            if let Ok(session_data) = ChatHistory::load_session(&sid) {
-                if let ChatHistory::Standard(history) = session_data.history {
-                    selected_models.set(history.selected_models);
-                    user_messages.set(history.user_messages);
-                    system_prompt.set(history.system_prompt);
-                    
-                    // Convert ModelResponse from history to internal format
-                    let converted_responses: Vec<Vec<ModelResponse>> = history.model_responses
-                        .into_iter()
-                        .map(|responses| {
-                            responses.into_iter()
-                                .map(|r| ModelResponse {
-                                    model_id: r.model_id,
-                                    content: r.content,
-                                    error_message: r.error_message,
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    model_responses.set(converted_responses);
-                    
-                    // Convert ConversationHistory
+    let should_load = session_id != *loaded_session_id.read();
+    
+    if should_load {
+        loaded_session_id.set(session_id.clone());
+        
+        if let Some(sid) = session_id.clone() {
+            match ChatHistory::load_session(&sid) {
+                Ok(session_data) => {
+                    if let ChatHistory::Standard(history) = session_data.history {
+                        selected_models.set(history.selected_models);
+                        user_messages.set(history.user_messages);
+                        system_prompt.set(history.system_prompt);
+                        
+                        // Convert ModelResponse from history to internal format
+                        let converted_responses: Vec<Vec<ModelResponse>> = history.model_responses
+                            .into_iter()
+                            .map(|responses| {
+                                responses.into_iter()
+                                    .map(|r| ModelResponse {
+                                        model_id: r.model_id,
+                                        content: r.content,
+                                        error_message: r.error_message,
+                                        metrics: None, // Historical responses don't have metrics
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        model_responses.set(converted_responses);
+                        
+                        // Convert ConversationHistory
+                        conversation_history.set(ConversationHistory {
+                            single_model: history.conversation_history.single_model,
+                            multi_model: history.conversation_history.multi_model,
+                        });
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to load session {}: {}", sid, e);
+                    selected_models.set(Vec::new());
+                    user_messages.set(Vec::new());
+                    model_responses.set(Vec::new());
+                    system_prompt.set("You are a helpful AI assistant.".to_string());
                     conversation_history.set(ConversationHistory {
-                        single_model: history.conversation_history.single_model,
-                        multi_model: history.conversation_history.multi_model,
+                        single_model: Vec::new(),
+                        multi_model: HashMap::new(),
                     });
                 }
             }
+        } else {
+            // New session - reset state
+            selected_models.set(Vec::new());
+            user_messages.set(Vec::new());
+            model_responses.set(Vec::new());
+            system_prompt.set("You are a helpful AI assistant.".to_string());
+            conversation_history.set(ConversationHistory {
+                single_model: Vec::new(),
+                multi_model: HashMap::new(),
+            });
         }
-    });
+    }
     
 
     // Handle model selection
@@ -151,7 +223,7 @@ pub fn Standard(props: StandardProps) -> Element {
                 // Since we can't use stream_chat_completion_multi with different messages per model,
                 // we'll stream each model individually and aggregate results
                 
-                let mut final_results = HashMap::new();
+                let mut final_results: HashMap<String, (String, Option<String>, Option<ResponseMetrics>)> = HashMap::new();
                 
                 if is_single_model {
                     // Single model with shared history
@@ -165,84 +237,198 @@ pub fn Standard(props: StandardProps) -> Element {
                     drop(history);
                     
                     let model_id = models[0].clone();
+                    let request_sent_at = std::time::Instant::now();
+                    let mut first_token_received = false;
+                    
                     match client.stream_chat_completion(model_id.clone(), messages).await {
                         Ok(mut stream) => {
                             let mut content = String::new();
+                            
+                            // Initialize metrics
+                            let mut metrics = ResponseMetrics {
+                                request_sent_at,
+                                first_token_at: None,
+                                completed_at: None,
+                            };
+                            
+                            // Throttle updates: only write to signal every 16ms
                             let mut last_update = std::time::Instant::now();
+                            const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
+                            
                             while let Some(event) = stream.next().await {
                                 match event {
                                     StreamEvent::Content(chunk) => {
-                                        content.push_str(&chunk);
-                                        let mut responses = current_streaming_responses_clone.write();
-                                        responses.insert(model_id.clone(), content.clone());
+                                        // Track first token
+                                        if !first_token_received {
+                                            metrics.first_token_at = Some(std::time::Instant::now());
+                                            first_token_received = true;
+                                        }
                                         
-                                        // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                        if last_update.elapsed().as_millis() >= 16 {
-                                            tokio::task::yield_now().await;
+                                        content.push_str(&chunk);
+                                        
+                                    // Throttle UI updates to reduce re-render churn.
+                                        if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                            let mut responses = current_streaming_responses_clone.write();
+                                            responses.insert(model_id.clone(), StreamingResponse {
+                                                content: content.clone(),
+                                                metrics: metrics.clone(),
+                                            });
                                             last_update = std::time::Instant::now();
                                         }
                                     }
                                     StreamEvent::Done => {
-                                        final_results.insert(model_id.clone(), (content.clone(), None));
+                                        metrics.completed_at = Some(std::time::Instant::now());
+                                        final_results.insert(model_id.clone(), (content.clone(), None, Some(metrics)));
                                         break;
                                     }
                                     StreamEvent::Error(e) => {
-                                        final_results.insert(model_id.clone(), (String::new(), Some(e)));
+                                        metrics.completed_at = Some(std::time::Instant::now());
+                                        let error_msg = format!("Error: {}", e);
+                                        // Immediately show error in streaming UI
+                                        current_streaming_responses_clone.write().insert(model_id.clone(), StreamingResponse {
+                                            content: error_msg.clone(),
+                                            metrics: metrics.clone(),
+                                        });
+                                        final_results.insert(model_id.clone(), (String::new(), Some(e), Some(metrics)));
                                         break;
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            final_results.insert(model_id, (String::new(), Some(e)));
+                            let metrics = ResponseMetrics {
+                                request_sent_at,
+                                first_token_at: None,
+                                completed_at: Some(std::time::Instant::now()),
+                            };
+                            let error_msg = format!("Error: {}", e);
+                            // Immediately show error in streaming UI
+                            current_streaming_responses_clone.write().insert(model_id.clone(), StreamingResponse {
+                                content: error_msg.clone(),
+                                metrics: metrics.clone(),
+                            });
+                            final_results.insert(model_id, (String::new(), Some(e), Some(metrics)));
                         }
                     }
                 } else {
-                    // Multiple models, each with separate history
+                    // Multiple models, each with separate history - stream concurrently
+                    use std::sync::Arc;
+                    use tokio::sync::Mutex;
+                    use futures::future::join_all;
+                    
+                    let shared_results = Arc::new(Mutex::new(HashMap::new()));
+                    let mut futures = Vec::new();
+                    
                     for model_id in &models {
-                        let history = conversation_history_clone.read();
-                        let mut messages = vec![ChatMessage::system(sys_prompt.clone())];
-                        if let Some(model_history) = history.multi_model.get(model_id) {
-                            for (user_msg, assistant_msg) in model_history {
-                                messages.push(ChatMessage::user(user_msg.clone()));
-                                messages.push(ChatMessage::assistant(assistant_msg.clone()));
-                            }
-                        }
-                        messages.push(ChatMessage::user(text.clone()));
-                        drop(history);
+                        let client = client.clone();
+                        let model_id = model_id.clone();
+                        let sys_prompt = sys_prompt.clone();
+                        let text = text.clone();
+                        let conversation_history_clone = conversation_history_clone.clone();
+                        let mut current_streaming_responses_clone = current_streaming_responses_clone.clone();
+                        let shared_results = shared_results.clone();
                         
-                        match client.stream_chat_completion(model_id.clone(), messages).await {
-                            Ok(mut stream) => {
-                                let mut content = String::new();
-                                let mut last_update = std::time::Instant::now();
-                                while let Some(event) = stream.next().await {
-                                    match event {
-                                        StreamEvent::Content(chunk) => {
-                                            content.push_str(&chunk);
-                                            let mut responses = current_streaming_responses_clone.write();
-                                            responses.insert(model_id.clone(), content.clone());
-                                            
-                                            // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                            if last_update.elapsed().as_millis() >= 16 {
-                                                tokio::task::yield_now().await;
-                                                last_update = std::time::Instant::now();
+                        let future = async move {
+                            let request_sent_at = std::time::Instant::now();
+                            let mut first_token_received = false;
+                            
+                            let history = conversation_history_clone.read();
+                            let mut messages = vec![ChatMessage::system(sys_prompt)];
+                            if let Some(model_history) = history.multi_model.get(&model_id) {
+                                for (user_msg, assistant_msg) in model_history {
+                                    messages.push(ChatMessage::user(user_msg.clone()));
+                                    messages.push(ChatMessage::assistant(assistant_msg.clone()));
+                                }
+                            }
+                            messages.push(ChatMessage::user(text));
+                            drop(history);
+                            
+                            match client.stream_chat_completion(model_id.clone(), messages).await {
+                                Ok(mut stream) => {
+                                    let mut content = String::new();
+                                    
+                                    // Initialize metrics
+                                    let mut metrics = ResponseMetrics {
+                                        request_sent_at,
+                                        first_token_at: None,
+                                        completed_at: None,
+                                    };
+                                    
+                                    // Buffer content locally to throttle updates
+                                    let mut last_update = std::time::Instant::now();
+                                    const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
+                                    
+                                    while let Some(event) = stream.next().await {
+                                        match event {
+                                            StreamEvent::Content(chunk) => {
+                                                // Track first token
+                                                if !first_token_received {
+                                                    metrics.first_token_at = Some(std::time::Instant::now());
+                                                    first_token_received = true;
+                                                }
+                                                
+                                                content.push_str(&chunk);
+                                                
+                                    // Throttle UI updates to reduce re-render churn.
+                                                if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                                    current_streaming_responses_clone.write().insert(model_id.clone(), StreamingResponse {
+                                                        content: content.clone(),
+                                                        metrics: metrics.clone(),
+                                                    });
+                                                    last_update = std::time::Instant::now();
+                                                }
                                             }
-                                        }
-                                        StreamEvent::Done => {
-                                            final_results.insert(model_id.clone(), (content.clone(), None));
-                                            break;
-                                        }
-                                        StreamEvent::Error(e) => {
-                                            final_results.insert(model_id.clone(), (String::new(), Some(e)));
-                                            break;
+                                            StreamEvent::Done => {
+                                                metrics.completed_at = Some(std::time::Instant::now());
+                                                // Flush final content
+                                                current_streaming_responses_clone.write().insert(model_id.clone(), StreamingResponse {
+                                                    content: content.clone(),
+                                                    metrics: metrics.clone(),
+                                                });
+                                                shared_results.lock().await.insert(model_id.clone(), (content, None, Some(metrics)));
+                                                break;
+                                            }
+                                            StreamEvent::Error(e) => {
+                                                metrics.completed_at = Some(std::time::Instant::now());
+                                                let error_msg = format!("Error: {}", e);
+                                                // Immediately show error in streaming UI
+                                                current_streaming_responses_clone.write().insert(model_id.clone(), StreamingResponse {
+                                                    content: error_msg.clone(),
+                                                    metrics: metrics.clone(),
+                                                });
+                                                shared_results.lock().await.insert(model_id.clone(), (String::new(), Some(e), Some(metrics)));
+                                                break;
+                                            }
                                         }
                                     }
                                 }
+                                Err(e) => {
+                                    let metrics = ResponseMetrics {
+                                        request_sent_at,
+                                        first_token_at: None,
+                                        completed_at: Some(std::time::Instant::now()),
+                                    };
+                                    let error_msg = format!("Error: {}", e);
+                                    // Immediately show error in streaming UI
+                                    current_streaming_responses_clone.write().insert(model_id.clone(), StreamingResponse {
+                                        content: error_msg.clone(),
+                                        metrics: metrics.clone(),
+                                    });
+                                    shared_results.lock().await.insert(model_id.clone(), (String::new(), Some(e), Some(metrics)));
+                                }
                             }
-                            Err(e) => {
-                                final_results.insert(model_id.clone(), (String::new(), Some(e)));
-                            }
-                        }
+                        };
+                        
+                        futures.push(future);
+                    }
+                    
+                    // Run all streams concurrently
+                    join_all(futures).await;
+                    
+                    // Extract final results from Arc<Mutex>
+                    let locked_results = shared_results.lock().await;
+                    for (k, v) in locked_results.iter() {
+                        final_results.insert(k.clone(), v.clone());
                     }
                 }
                 
@@ -250,13 +436,14 @@ pub fn Standard(props: StandardProps) -> Element {
                 let mut final_responses: Vec<ModelResponse> = models
                     .iter()
                     .map(|model_id| {
-                        let (content, error) = final_results.get(model_id)
+                        let (content, error, metrics) = final_results.get(model_id)
                             .cloned()
-                            .unwrap_or_else(|| (String::new(), Some("No response received".to_string())));
+                            .unwrap_or_else(|| (String::new(), Some("No response received".to_string()), None));
                         ModelResponse {
                             model_id: model_id.clone(),
                             content,
                             error_message: error,
+                            metrics,
                         }
                     })
                     .collect();
@@ -297,6 +484,7 @@ pub fn Standard(props: StandardProps) -> Element {
                                         model_id: r.model_id.clone(),
                                         content: r.content.clone(),
                                         error_message: r.error_message.clone(),
+                                        // Note: utils::ModelResponse doesn't have metrics field
                                     })
                                     .collect()
                             })
@@ -320,7 +508,8 @@ pub fn Standard(props: StandardProps) -> Element {
                     let session_data = SessionData {
                         session,
                         history: ChatHistory::Standard(history),
-                        created_at: ChatHistory::format_timestamp(),
+                        created_at: ChatHistory::session_timestamp_from_id(&sid)
+                            .unwrap_or_else(ChatHistory::format_timestamp),
                         updated_at: ChatHistory::format_timestamp(),
                     };
                     
@@ -388,7 +577,7 @@ pub fn Standard(props: StandardProps) -> Element {
                 
                 // Chat interface
                 div {
-                    class: "flex-1 overflow-y-auto p-4",
+                    class: "flex-1 min-h-0 overflow-y-auto p-4",
 
                     if user_messages.read().is_empty() {
                         // Empty state
@@ -415,7 +604,7 @@ pub fn Standard(props: StandardProps) -> Element {
                     } else {
                         // Messages display
                         div {
-                            class: "space-y-6 max-w-6xl mx-auto",
+                            class: "space-y-6 w-full",
 
                             for (idx, user_msg) in user_messages.read().iter().enumerate() {
                                 div {
@@ -425,7 +614,7 @@ pub fn Standard(props: StandardProps) -> Element {
                                     div {
                                         class: "flex justify-end mb-4",
                                         div {
-                                            class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
+                                            class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-3 sm:px-4 md:px-5 py-2 sm:py-3 rounded-lg text-sm sm:text-base",
                                             FormattedText {
                                                 theme,
                                                 content: user_msg.clone(),
@@ -441,9 +630,9 @@ pub fn Standard(props: StandardProps) -> Element {
                                                 class: "flex justify-start",
                                                 div {
                                                     class: if responses[0].error_message.is_some() {
-                                                        "w-full max-w-[85%] bg-red-500/10 border-2 border-red-500/50 text-[var(--color-base-content)] px-4 py-3 rounded-lg"
+                                                        "w-full max-w-[85%] bg-red-500/10 border-2 border-red-500/50 text-[var(--color-base-content)] px-3 sm:px-4 md:px-5 py-2 sm:py-3 rounded-lg text-sm sm:text-base"
                                                     } else {
-                                                        "w-full max-w-[85%] bg-[var(--color-base-200)] text-[var(--color-base-content)] px-4 py-3 rounded-lg"
+                                                        "w-full max-w-[85%] bg-[var(--color-base-200)] text-[var(--color-base-content)] px-3 sm:px-4 md:px-5 py-2 sm:py-3 rounded-lg text-sm sm:text-base"
                                                     },
                                                     div {
                                                         class: "text-xs text-[var(--color-base-content)]/60 mb-2 flex items-center gap-1",
@@ -475,20 +664,39 @@ pub fn Standard(props: StandardProps) -> Element {
                                                                 content: responses[0].content.clone(),
                                                             }
                                                         }
+                                                        if let Some(metrics) = &responses[0].metrics {
+                                                            div {
+                                                                class: "mt-2 pt-2 border-t border-[var(--color-base-300)] text-xs text-[var(--color-base-content)]/60 flex flex-wrap gap-2",
+                                                                if let Some(ttft) = metrics.time_to_first_token() {
+                                                                    span {
+                                                                        class: "flex items-center gap-1",
+                                                                        span { "⚡" }
+                                                                        span { "TTFT: {ResponseMetrics::format_duration(ttft)}" }
+                                                                    }
+                                                                }
+                                                                if let Some(total) = metrics.total_time() {
+                                                                    span {
+                                                                        class: "flex items-center gap-1",
+                                                                        span { "⏱️" }
+                                                                        span { "Total: {ResponseMetrics::format_duration(total)}" }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
                                         } else {
                                             // Multiple models - card grid
                                             div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3",
+                                                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 w-full",
                                                 for response in responses {
                                                     div {
                                                         key: "{response.model_id}",
                                                         class: if response.error_message.is_some() {
-                                                            "bg-red-500/10 rounded-lg p-3 border-2 border-red-500/50"
+                                                            "bg-red-500/10 rounded-lg p-3 sm:p-4 border-2 border-red-500/50 h-full flex flex-col"
                                                         } else {
-                                                            "bg-[var(--color-base-200)] rounded-lg p-3 border border-[var(--color-base-300)]"
+                                                            "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)] h-full flex flex-col"
                                                         },
                                                         div {
                                                             class: "text-xs font-semibold text-[var(--color-base-content)]/70 mb-2 truncate flex items-center gap-1",
@@ -515,10 +723,29 @@ pub fn Standard(props: StandardProps) -> Element {
                                                             }
                                                         } else {
                                                             div {
-                                                                class: "text-sm text-[var(--color-base-content)]",
+                                                                class: "text-sm sm:text-base text-[var(--color-base-content)] flex-1",
                                                                 FormattedText {
                                                                     theme,
                                                                     content: response.content.clone(),
+                                                                }
+                                                            }
+                                                            if let Some(metrics) = &response.metrics {
+                                                                div {
+                                                                    class: "mt-2 pt-2 border-t border-[var(--color-base-300)] text-xs text-[var(--color-base-content)]/60 flex flex-wrap gap-2",
+                                                                    if let Some(ttft) = metrics.time_to_first_token() {
+                                                                        span {
+                                                                            class: "flex items-center gap-1",
+                                                                            span { "⚡" }
+                                                                            span { "TTFT: {ResponseMetrics::format_duration(ttft)}" }
+                                                                        }
+                                                                    }
+                                                                    if let Some(total) = metrics.total_time() {
+                                                                        span {
+                                                                            class: "flex items-center gap-1",
+                                                                            span { "⏱️" }
+                                                                            span { "Total: {ResponseMetrics::format_duration(total)}" }
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -532,55 +759,193 @@ pub fn Standard(props: StandardProps) -> Element {
                                             let streaming_responses = current_streaming_responses.read();
                                             let is_single_model = selected_models.read().len() == 1;
                                             let models = selected_models.read().clone();
+                                            
+                                            // Check if single model has error
+                                            let single_model_is_error = if is_single_model {
+                                                streaming_responses.get(&models[0])
+                                                    .map(|sr| sr.content.starts_with("Error: "))
+                                                    .unwrap_or(false)
+                                            } else {
+                                                false
+                                            };
 
-                                            rsx! {
-                                        if is_single_model {
-                                            // Single model streaming
-                                            div {
-                                                class: "flex justify-start",
-                                                div {
-                                                    class: "w-full max-w-[85%] bg-[var(--color-base-200)] text-[var(--color-base-content)] px-4 py-3 rounded-lg",
-                                                    div {
-                                                        class: "text-xs text-[var(--color-base-content)]/60 mb-2 flex items-center gap-2",
-                                                        span { "{models[0]}" }
-                                                        span {
-                                                            class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
-                                                        }
+                                            // Pre-compute error message and privacy link for single model
+                                            let (single_error_msg, single_has_privacy) = if is_single_model {
+                                                if let Some(streaming) = streaming_responses.get(&models[0]) {
+                                                    if streaming.content.starts_with("Error: ") {
+                                                        let error_msg = streaming.content.strip_prefix("Error: ").unwrap_or(&streaming.content);
+                                                        let has_privacy = error_msg.contains("data policy") || error_msg.contains("data retention");
+                                                        (Some(error_msg.to_string()), has_privacy)
+                                                    } else {
+                                                        (None, false)
                                                     }
-                                                    div {
-                                                        FormattedText {
-                                                            theme,
-                                                            content: streaming_responses.get(&models[0]).cloned().unwrap_or_default(),
-                                                        }
+                                                } else {
+                                                    (None, false)
+                                                }
+                                            } else {
+                                                (None, false)
+                                            };
+
+                                            // Pre-compute error messages and privacy flags for all models
+                                            let mut model_errors: HashMap<String, (String, bool)> = HashMap::new();
+                                            for model_id in models.iter() {
+                                                if let Some(streaming) = streaming_responses.get(model_id) {
+                                                    if streaming.content.starts_with("Error: ") {
+                                                        let error_msg = streaming.content.strip_prefix("Error: ").unwrap_or(&streaming.content).to_string();
+                                                        let has_privacy = error_msg.contains("data policy") || error_msg.contains("data retention");
+                                                        model_errors.insert(model_id.clone(), (error_msg, has_privacy));
                                                     }
                                                 }
                                             }
-                                        } else {
-                                            // Multiple models streaming
-                                            div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3",
+
+                                            rsx! {
+                                                if is_single_model {
+                                                    // Single model streaming
+                                                    div {
+                                                        class: "flex justify-start",
+                                                        div {
+                                                            class: if single_model_is_error {
+                                                                "w-full max-w-[85%] bg-red-500/10 border-2 border-red-500/50 text-[var(--color-base-content)] px-3 sm:px-4 md:px-5 py-2 sm:py-3 rounded-lg text-sm sm:text-base"
+                                                            } else {
+                                                                "w-full max-w-[85%] bg-[var(--color-base-200)] text-[var(--color-base-content)] px-4 py-3 rounded-lg"
+                                                            },
+                                                            div {
+                                                                class: "text-xs text-[var(--color-base-content)]/60 mb-2 flex items-center gap-2",
+                                                                if single_model_is_error {
+                                                                    span { "⚠️" }
+                                                                }
+                                                                span { "{models[0]}" }
+                                                                if !single_model_is_error {
+                                                                    span {
+                                                                        class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
+                                                                    }
+                                                                }
+                                                            }
+                                                            if let Some(streaming) = streaming_responses.get(&models[0]) {
+                                                                if streaming.content.starts_with("Error: ") {
+                                                                    if let Some(ref error_msg) = single_error_msg {
+                                                                        div {
+                                                                            class: "text-sm text-[var(--color-base-content)] p-3 bg-red-500/20 rounded",
+                                                                            div {
+                                                                                class: "whitespace-pre-wrap mb-2",
+                                                                                "{error_msg}"
+                                                                            }
+                                                                            if single_has_privacy {
+                                                                                a {
+                                                                                    href: "https://openrouter.ai/settings/privacy",
+                                                                                    target: "_blank",
+                                                                                    class: "text-xs text-[var(--color-primary)] hover:underline",
+                                                                                    "Configure Privacy Settings →"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                            div {
+                                                                class: "whitespace-pre-wrap break-words",
+                                                                "{streaming.content}"
+                                                            }
+                                                        }
+                                                    }
+                                                    if let Some(streaming) = streaming_responses.get(&models[0]) {
+                                                        // Only show metrics if not an error (errors complete immediately)
+                                                        if !streaming.content.starts_with("Error: ") {
+                                                            div {
+                                                                class: "mt-2 pt-2 border-t border-[var(--color-base-300)] text-xs text-[var(--color-base-content)]/60 flex flex-wrap gap-2",
+                                                                if let Some(ttft) = streaming.metrics.time_to_first_token() {
+                                                                    span {
+                                                                        class: "flex items-center gap-1",
+                                                                        span { "⚡" }
+                                                                        span { "TTFT: {ResponseMetrics::format_duration(ttft)}" }
+                                                                    }
+                                                                }
+                                                                span {
+                                                                    class: "flex items-center gap-1",
+                                                                    span { "🔄" }
+                                                                    span { "Streaming..." }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    }
+                                                }
+                                            } else {
+                                                // Multiple models streaming
+                                                div {
+                                                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 w-full",
                                                 for model_id in models.iter() {
                                                     div {
                                                         key: "{model_id}",
-                                                        class: "bg-[var(--color-base-200)] rounded-lg p-3 border border-[var(--color-base-300)]",
+                                                        class: if streaming_responses.get(model_id).map(|sr| sr.content.starts_with("Error: ")).unwrap_or(false) {
+                                                            "bg-red-500/10 rounded-lg p-3 sm:p-4 border-2 border-red-500/50 h-full flex flex-col"
+                                                        } else {
+                                                            "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)] h-full flex flex-col"
+                                                        },
                                                         div {
                                                             class: "text-xs font-semibold text-[var(--color-base-content)]/70 mb-2 truncate flex items-center gap-2",
+                                                            if streaming_responses.get(model_id).map(|sr| sr.content.starts_with("Error: ")).unwrap_or(false) {
+                                                                span { "⚠️" }
+                                                            }
                                                             span { "{model_id}" }
-                                                            span {
-                                                                class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
+                                                            if !streaming_responses.get(model_id).map(|sr| sr.content.starts_with("Error: ")).unwrap_or(false) {
+                                                                span {
+                                                                    class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
+                                                                }
                                                             }
                                                         }
-                                                        div {
-                                                            class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
-                                                            FormattedText {
-                                                                theme,
-                                                                content: streaming_responses.get(model_id).cloned().unwrap_or_default(),
+                                                        if let Some(streaming) = streaming_responses.get(model_id) {
+                                                            if streaming.content.starts_with("Error: ") {
+                                                                if let Some((ref error_msg, has_privacy_link)) = model_errors.get(model_id) {
+                                                                    div {
+                                                                        class: "text-xs text-[var(--color-base-content)] p-2 bg-red-500/20 rounded min-h-[3rem] flex-1",
+                                                                        div {
+                                                                            class: "whitespace-pre-wrap mb-2",
+                                                                            "{error_msg}"
+                                                                        }
+                                                                        if *has_privacy_link {
+                                                                            a {
+                                                                                href: "https://openrouter.ai/settings/privacy",
+                                                                                target: "_blank",
+                                                                                class: "text-xs text-[var(--color-primary)] hover:underline",
+                                                                                "Configure Privacy Settings →"
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                div {
+                                                                    class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem] flex-1",
+                                                                    div {
+                                                                        class: "whitespace-pre-wrap break-words",
+                                                                        "{streaming.content}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if let Some(streaming) = streaming_responses.get(model_id) {
+                                                            // Only show metrics if not an error (errors complete immediately)
+                                                            if !streaming.content.starts_with("Error: ") {
+                                                                div {
+                                                                    class: "mt-2 pt-2 border-t border-[var(--color-base-300)] text-xs text-[var(--color-base-content)]/60 flex flex-wrap gap-2",
+                                                                    if let Some(ttft) = streaming.metrics.time_to_first_token() {
+                                                                        span {
+                                                                            class: "flex items-center gap-1",
+                                                                            span { "⚡" }
+                                                                            span { "TTFT: {ResponseMetrics::format_duration(ttft)}" }
+                                                                        }
+                                                                    }
+                                                                    span {
+                                                                        class: "flex items-center gap-1",
+                                                                        span { "🔄" }
+                                                                        span { "Streaming..." }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
+                                                    }
                                                 }
                                             }
-                                        }
                                             }
                                         }
                                     }

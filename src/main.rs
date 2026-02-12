@@ -27,9 +27,16 @@ fn App() -> Element {
 
     // Create OpenRouter client if API key exists
     let mut openrouter_client = use_signal(|| {
-        app_settings.read().get_api_key().map(|key| {
-            Arc::new(OpenRouterClient::new(key.to_string()))
-        })
+        app_settings
+            .read()
+            .get_api_key()
+            .and_then(|key| match OpenRouterClient::new(key.to_string()) {
+                Ok(client) => Some(Arc::new(client)),
+                Err(e) => {
+                    eprintln!("Failed to initialize OpenRouter client: {}", e);
+                    None
+                }
+            })
     });
 
     // Theme state - load from settings
@@ -89,7 +96,9 @@ fn App() -> Element {
         } else {
             utils::ThemeMode::Light
         };
-        let _ = settings.save();
+        if let Err(e) = settings.save() {
+            eprintln!("Failed to save theme settings: {}", e);
+        }
     };
 
     // Handler for changing theme within mode
@@ -104,7 +113,9 @@ fn App() -> Element {
         } else {
             utils::ThemeMode::Light
         };
-        let _ = settings.save();
+        if let Err(e) = settings.save() {
+            eprintln!("Failed to save theme settings: {}", e);
+        }
     };
 
     // Handler for saving API key
@@ -117,25 +128,67 @@ fn App() -> Element {
         }
 
         // Recreate OpenRouter client with new API key
-        openrouter_client.set(Some(Arc::new(OpenRouterClient::new(api_key))));
-    };
-
-    // Handler for creating new chat
-    let new_chat = move |_| {
-        current_view.set(AppView::NewChat);
-        messages.write().clear();
-        arena_messages.write().clear();
-        current_session.set(None);
+        match OpenRouterClient::new(api_key) {
+            Ok(client) => openrouter_client.set(Some(Arc::new(client))),
+            Err(e) => {
+                eprintln!("Failed to initialize OpenRouter client: {}", e);
+                openrouter_client.set(None);
+            }
+        }
     };
 
     // Handler for selecting a session
-    let select_session = move |session_id: String| {
-        if let Some(session) = sessions.read().iter().find(|s| s.id == session_id) {
-            current_session.set(Some(session_id.clone()));
-            current_view.set(AppView::ChatMode(session.mode));
-            // Messages will be loaded by the mode component itself
+    let select_session = {
+        let mut sessions_clone = sessions.clone();
+        move |session_id: String| {
+            // Refresh sessions list first to ensure we have the latest data
+            match ChatHistory::list_sessions() {
+                Ok(new_sessions) => {
+                    sessions_clone.set(new_sessions);
+                }
+                Err(e) => {
+                    eprintln!("Failed to refresh sessions: {}", e);
+                }
+            }
+            
+            // Try to find the session in the refreshed list
+            let session_opt = sessions_clone.read().iter().find(|s| s.id == session_id).cloned();
+            if let Some(session) = session_opt {
+                // Verify the file actually exists before trying to load
+                if ChatHistory::session_path(&session_id).is_ok() {
+                    current_session.set(Some(session_id.clone()));
+                    current_view.set(AppView::ChatMode(session.mode));
+                    // Messages will be loaded by the mode component itself
+                    messages.write().clear();
+                    arena_messages.write().clear();
+                } else {
+                    eprintln!("Session file not found: {}", session_id);
+                    // Remove invalid session from list
+                    sessions_clone.write().retain(|s| s.id != session_id);
+                }
+            } else {
+                eprintln!("Session not found in list: {}", session_id);
+            }
+        }
+    };
+
+    // Handler for creating new chat
+    let new_chat = {
+        let mut sessions_clone = sessions.clone();
+        move |_| {
+            current_view.set(AppView::NewChat);
             messages.write().clear();
             arena_messages.write().clear();
+            current_session.set(None);
+            // Refresh sessions list to pick up any new or renamed sessions
+            match ChatHistory::list_sessions() {
+                Ok(new_sessions) => {
+                    sessions_clone.set(new_sessions);
+                }
+                Err(e) => {
+                    eprintln!("Failed to refresh sessions: {}", e);
+                }
+            }
         }
     };
 
@@ -148,7 +201,7 @@ fn App() -> Element {
             id: session_id.clone(),
             title,
             mode,
-            timestamp: ChatHistory::format_timestamp_display(&timestamp),
+            timestamp,
         };
         sessions.write().push(new_session.clone());
         current_session.set(Some(session_id));

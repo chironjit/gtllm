@@ -1,6 +1,7 @@
 use futures::stream::{Stream, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -221,16 +222,18 @@ impl PartialEq for OpenRouterClient {
 }
 
 impl OpenRouterClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .pool_max_idle_per_host(10) // Allow multiple concurrent connections per host
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
-        Self {
+        Ok(Self {
             client,
             api_key: Arc::new(api_key),
-        }
+        })
     }
 
     // ========================================================================
@@ -272,7 +275,7 @@ impl OpenRouterClient {
                 error_text
             };
 
-            return Err(error_message);
+            return Err(format!("OpenRouter error ({}): {}", status, error_message));
         }
 
         let models_response: ModelsResponse = response
@@ -322,7 +325,7 @@ impl OpenRouterClient {
                 error_text
             };
 
-            return Err(error_message);
+            return Err(format!("OpenRouter error ({}): {}", status, error_message));
         }
 
         let credits_response: CreditsResponse = response
@@ -387,25 +390,45 @@ impl OpenRouterClient {
                 error_text
             };
 
-            return Err(error_message);
+            return Err(format!("OpenRouter error ({}): {}", status, error_message));
         }
 
-        // Create a stream from the response bytes
-        let bytes_stream = response.bytes_stream();
+        // Parse SSE safely across arbitrary network chunk boundaries.
+        let stream = futures::stream::unfold(
+            (response.bytes_stream(), String::new(), VecDeque::<StreamEvent>::new(), false),
+            |(mut bytes_stream, mut partial, mut pending, mut finished)| async move {
+                loop {
+                    if let Some(event) = pending.pop_front() {
+                        return Some((event, (bytes_stream, partial, pending, finished)));
+                    }
 
-        // Process SSE stream
-        let stream = bytes_stream.map(move |result| match result {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                parse_sse_chunk(&text)
-            }
-            Err(e) => vec![StreamEvent::Error(format!("Stream error: {}", e))],
-        });
+                    if finished {
+                        return None;
+                    }
 
-        // Flatten the stream of Vec<StreamEvent> into individual events
-        let flattened_stream = stream.flat_map(futures::stream::iter);
+                    match bytes_stream.next().await {
+                        Some(Ok(bytes)) => {
+                            partial.push_str(&String::from_utf8_lossy(&bytes));
+                            for event in parse_sse_from_buffer(&mut partial, false) {
+                                pending.push_back(event);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            pending.push_back(StreamEvent::Error(format!("Stream error: {}", e)));
+                            finished = true;
+                        }
+                        None => {
+                            for event in parse_sse_from_buffer(&mut partial, true) {
+                                pending.push_back(event);
+                            }
+                            finished = true;
+                        }
+                    }
+                }
+            },
+        );
 
-        Ok(Box::pin(flattened_stream))
+        Ok(Box::pin(stream))
     }
 
     // ========================================================================
@@ -512,7 +535,7 @@ impl OpenRouterClient {
                 error_text
             };
 
-            return Err(error_message);
+            return Err(format!("OpenRouter error ({}): {}", status, error_message));
         }
 
         let completion_response: ChatCompletionResponse = response
@@ -533,64 +556,86 @@ impl OpenRouterClient {
 // SSE Parsing Helper
 // ============================================================================
 
-fn parse_sse_chunk(text: &str) -> Vec<StreamEvent> {
+fn parse_sse_from_buffer(buffer: &mut String, flush_remaining: bool) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
-    for line in text.lines() {
-        let line = line.trim();
+    while let Some(newline_idx) = buffer.find('\n') {
+        let mut line: String = buffer.drain(..=newline_idx).collect();
+        if line.ends_with('\n') {
+            line.pop();
+        }
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        parse_sse_line(&line, &mut events);
+    }
 
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with(':') {
-            continue;
+    if flush_remaining && !buffer.trim().is_empty() {
+        let line = buffer.trim().to_string();
+        parse_sse_line(&line, &mut events);
+        buffer.clear();
+    }
+
+    events
+}
+
+fn parse_sse_line(line: &str, events: &mut Vec<StreamEvent>) {
+    let line = line.trim();
+
+    // Skip empty lines and comments
+    if line.is_empty() || line.starts_with(':') {
+        return;
+    }
+
+    if let Some(data) = line.strip_prefix("data: ") {
+        if data == "[DONE]" {
+            events.push(StreamEvent::Done);
+            return;
         }
 
-        // Parse SSE data lines
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data == "[DONE]" {
-                events.push(StreamEvent::Done);
-                continue;
+        match serde_json::from_str::<ChatCompletionResponse>(data) {
+            Ok(response) => {
+                if let Some(error) = response.error {
+                    events.push(StreamEvent::Error(error.message));
+                    return;
+                }
+
+                if let Some(choice) = response.choices.first() {
+                    if let Some(delta) = &choice.delta {
+                        if let Some(content) = &delta.content {
+                            if !content.is_empty() {
+                                events.push(StreamEvent::Content(content.clone()));
+                            }
+                        }
+                    }
+
+                    if let Some(finish_reason) = &choice.finish_reason {
+                        if finish_reason == "error" {
+                            events.push(StreamEvent::Error(
+                                "Stream terminated with error".to_string(),
+                            ));
+                        } else if !finish_reason.is_empty() {
+                            events.push(StreamEvent::Done);
+                        }
+                    }
+                }
             }
-
-            // Try to parse as JSON
-            match serde_json::from_str::<ChatCompletionResponse>(data) {
-                Ok(response) => {
-                    // Check for error in response
-                    if let Some(error) = response.error {
-                        events.push(StreamEvent::Error(error.message));
-                        continue;
-                    }
-
-                    // Extract content from delta
-                    if let Some(choice) = response.choices.first() {
-                        if let Some(delta) = &choice.delta {
-                            if let Some(content) = &delta.content {
-                                if !content.is_empty() {
-                                    events.push(StreamEvent::Content(content.clone()));
-                                }
-                            }
-                        }
-
-                        // Check finish reason
-                        if let Some(finish_reason) = &choice.finish_reason {
-                            if finish_reason == "error" {
-                                events.push(StreamEvent::Error(
-                                    "Stream terminated with error".to_string(),
-                                ));
-                            } else if !finish_reason.is_empty() {
-                                events.push(StreamEvent::Done);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Only log parsing errors, don't emit error events for malformed JSON
-                    // as some chunks might be incomplete
-                    eprintln!("Failed to parse SSE chunk: {} - {}", e, data);
-                }
+            Err(e) => {
+                // Do not log the raw payload to avoid leaking prompt/response contents.
+                eprintln!(
+                    "Failed to parse SSE chunk: {} (payload_len={})",
+                    e,
+                    data.len()
+                );
             }
         }
     }
+}
 
+fn parse_sse_chunk(text: &str) -> Vec<StreamEvent> {
+    let mut buffer = text.to_string();
+    let mut events = Vec::new();
+    events.extend(parse_sse_from_buffer(&mut buffer, true));
     events
 }
 
@@ -649,5 +694,18 @@ mod tests {
         let chunk = ": OPENROUTER PROCESSING\n";
         let events = parse_sse_chunk(chunk);
         assert_eq!(events.len(), 0); // Comments should be ignored
+    }
+
+    #[test]
+    fn test_parse_sse_buffered_split_chunks() {
+        let mut buffer = String::new();
+        buffer.push_str("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"Hel");
+        let events = parse_sse_from_buffer(&mut buffer, false);
+        assert!(events.is_empty());
+
+        buffer.push_str("lo\"},\"finish_reason\":null}],\"created\":1,\"model\":\"m\"}\n");
+        let events = parse_sse_from_buffer(&mut buffer, false);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], StreamEvent::Content(_)));
     }
 }

@@ -24,3 +24,9 @@ script = []
 # Javascript code file
 # serve: [dev-server] only
 script = []
+
+[bundle]
+identifier = "com.chironjit.gtllm"
+publisher = "Chironjit Das"
+
+

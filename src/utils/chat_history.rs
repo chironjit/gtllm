@@ -247,13 +247,22 @@ impl ChatHistory {
             return None;
         };
         
-        // Timestamp is at timestamp_idx
-        let timestamp = parts[timestamp_idx].to_string();
+        // Timestamp is at timestamp_idx and must be a unix timestamp
+        let timestamp = parts[timestamp_idx];
+        if timestamp.parse::<u64>().is_err() {
+            return None;
+        }
         
         // Rest is title (may contain underscores)
         let title = parts[timestamp_idx + 1..].join("_");
         
-        Some((mode, timestamp, title))
+        Some((mode, timestamp.to_string(), title))
+    }
+
+    /// Extract the unix timestamp segment from a session ID.
+    pub fn session_timestamp_from_id(session_id: &str) -> Option<String> {
+        let filename = format!("{}.json", session_id);
+        Self::parse_filename(&filename).map(|(_, timestamp, _)| timestamp)
     }
 
     /// Get the path to a specific session file
@@ -262,8 +271,9 @@ impl ChatHistory {
         Ok(Self::chats_dir()?.join(format!("{}.json", session_id)))
     }
 
-    /// List all saved sessions by parsing filenames (fast, no file I/O)
-    /// Returns only ChatSession objects, not full SessionData
+    /// List all saved sessions.
+    /// Reads session metadata from each file to keep title/mode in sync.
+    /// Deduplicates by session ID to prevent duplicate entries.
     pub fn list_sessions() -> Result<Vec<ChatSession>, String> {
         let chats_dir = Self::chats_dir()?;
         
@@ -272,6 +282,7 @@ impl ChatHistory {
         }
 
         let mut sessions = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
         let entries = fs::read_dir(&chats_dir)
             .map_err(|e| format!("Failed to read chats directory: {}", e))?;
 
@@ -281,17 +292,28 @@ impl ChatHistory {
             
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                    // Parse filename to extract metadata
-                    if let Some((mode, timestamp, title)) = Self::parse_filename(file_name) {
-                        // Create session from filename metadata (no file I/O!)
-                        let session_id = file_name.strip_suffix(".json").unwrap_or(file_name).to_string();
-                        let session = ChatSession {
-                            id: session_id,
-                            title,
-                            mode,
-                            timestamp,
-                        };
-                        sessions.push(session);
+                    let session_id = file_name.strip_suffix(".json").unwrap_or(file_name).to_string();
+                    if seen_ids.contains(&session_id) {
+                        continue;
+                    }
+                    seen_ids.insert(session_id.clone());
+
+                    match Self::load_session_file(&path) {
+                        Ok(mut data) => {
+                            data.session.id = session_id.clone();
+                            sessions.push(data.session);
+                        }
+                        Err(_) => {
+                            // Fallback to filename metadata for backward compatibility.
+                            if let Some((mode, timestamp, title)) = Self::parse_filename(file_name) {
+                                sessions.push(ChatSession {
+                                    id: session_id,
+                                    title,
+                                    mode,
+                                    timestamp,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -312,6 +334,12 @@ impl ChatHistory {
     /// session_id is the filename without .json extension
     pub fn load_session(session_id: &str) -> Result<SessionData, String> {
         let path = Self::session_path(session_id)?;
+        
+        // Check if file exists before trying to load
+        if !path.exists() {
+            return Err(format!("Session file not found: {}", path.display()));
+        }
+        
         let mut session_data = Self::load_session_file(&path)?;
         
         // Update session.id to match filename (in case it was changed)
@@ -331,10 +359,8 @@ impl ChatHistory {
         Ok(session_data)
     }
 
-    /// Save a session to disk using atomic write (temp file + rename)
-    /// The filename is generated from mode, timestamp, and title
-    /// If the title changed, the file will be renamed
-    /// Returns the new session ID (filename without .json) if it changed
+    /// Save a session to disk using atomic write (temp file + rename).
+    /// Uses the existing session ID as the canonical filename to keep IDs stable.
     pub fn save_session(session_data: &SessionData) -> Result<Option<String>, String> {
         let chats_dir = Self::chats_dir()?;
         
@@ -344,33 +370,14 @@ impl ChatHistory {
                 .map_err(|e| format!("Failed to create chats directory: {}", e))?;
         }
 
-        // Generate new filename from session data
-        let new_filename = Self::generate_filename(
-            session_data.session.mode,
-            &session_data.updated_at,
-            &session_data.session.title,
-        );
-        let new_session_id = new_filename.strip_suffix(".json").unwrap_or(&new_filename).to_string();
-        let new_path = chats_dir.join(&new_filename);
+        let session_id = session_data.session.id.clone();
+        let filename = format!("{}.json", session_id);
+        let new_path = chats_dir.join(&filename);
         let temp_path = new_path.with_extension("tmp");
-        
-        // Check if we need to rename (if session.id doesn't match new filename)
-        let old_filename = format!("{}.json", session_data.session.id);
-        let needs_rename = old_filename != new_filename;
-        
-        if needs_rename {
-            // Title or timestamp changed - need to rename
-            let old_path = chats_dir.join(&old_filename);
-            if old_path.exists() && old_path != new_path {
-                // Delete old file (we'll create new one with correct name)
-                fs::remove_file(&old_path)
-                    .map_err(|e| format!("Failed to remove old session file: {}", e))?;
-            }
-        }
-        
-        // Create updated session data with correct session.id
+
+        // Persist a self-consistent session payload.
         let mut updated_session_data = session_data.clone();
-        updated_session_data.session.id = new_session_id.clone();
+        updated_session_data.session.id = session_id;
         
         let contents = serde_json::to_string_pretty(&updated_session_data)
             .map_err(|e| format!("Failed to serialize session: {}", e))?;
@@ -395,12 +402,7 @@ impl ChatHistory {
         fs::rename(&temp_path, &new_path)
             .map_err(|e| format!("Failed to rename temporary file to session file: {}", e))?;
 
-        // Return new session ID if it changed
-        if needs_rename {
-            Ok(Some(new_session_id))
-        } else {
-            Ok(None)
-        }
+        Ok(None)
     }
 
     /// Delete a session from disk
@@ -453,11 +455,7 @@ impl ChatHistory {
 
     /// Format timestamp for display
     pub fn format_timestamp() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = Self::current_unix_timestamp_secs();
         
         // Format as simple timestamp (seconds since epoch)
         // For display, we'll format it when needed
@@ -472,10 +470,7 @@ impl ChatHistory {
             let datetime = UNIX_EPOCH + Duration::from_secs(secs);
             if let Ok(_datetime) = datetime.duration_since(UNIX_EPOCH) {
                 // Simple format: just show relative time for now
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                let now = Self::current_unix_timestamp_secs();
                 let diff = now.saturating_sub(secs);
                 
                 if diff < 60 {
@@ -562,12 +557,7 @@ impl ChatHistory {
     pub fn format_timestamp_date(timestamp: &str) -> String {
         // Try to parse as unix timestamp
         if let Ok(secs) = timestamp.parse::<u64>() {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+            let now = Self::current_unix_timestamp_secs();
             
             // Calculate days since epoch
             let days_since_epoch = secs / 86400;
@@ -608,6 +598,14 @@ impl ChatHistory {
         } else {
             timestamp.to_string()
         }
+    }
+
+    fn current_unix_timestamp_secs() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
     }
 }
 

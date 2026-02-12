@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.chironjit.gtllm</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>GTLLM</name>
+  <summary>Multi-LLM chat application with game theory inspired modes</summary>
+  <description>
+    <p>
+      GTLLM (Game Theory LLM) is a desktop application that tries to use multi-LLM chat system
+      inspired by game theory concepts and Andrej Karpathy's council llm demo. It provides several unique chat modes:
+    </p> 
+    <ul>
+      <li><b>Standard</b> - Normal single or multiple LLMs in individual chats</li>
+      <li><b>PvP</b> - 2 LLMs compete with 1 moderator judging</li>
+      <li><b>Collaborative</b> - Multiple LLMs work together to agree on the best solution</li>
+      <li><b>Competitive</b> - LLMs propose solutions and vote on the best one (can't vote for their own)</li>
+      <li><b>LLM's Choice</b> - The LLMs decide whether to collaborate or compete</li>
+    </ul>
+    <p>
+      GTLLM uses OpenRouter APIs for LLM inference, allowing you to use various language models
+      through a single API key. You must have your own OpenRouter key
+    </p>
+    <p>
+      This application has been built with Dioxus and Tailwind CSS.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/chironjit/gtllm</url>
+  <url type="bugtracker">https://github.com/chironjit/gtllm/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>GTLLM Main Interface</caption>
+    </screenshot>
+  </screenshots>
+  <developer_name>Chironjit Das</developer_name>
+  <releases>
+    <release version="0.1.0" date="2024-01-01">
+      <description>
+        <p>Initial release</p>
+      </description>
+    </release>
+  </releases>
+</component>

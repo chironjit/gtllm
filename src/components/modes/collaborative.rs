@@ -106,7 +106,9 @@ pub struct CollaborativeProps {
 
 impl PartialEq for CollaborativeProps {
     fn eq(&self, other: &Self) -> bool {
-        self.theme == other.theme && self.input_settings == other.input_settings
+        self.theme == other.theme 
+            && self.input_settings == other.input_settings
+            && self.session_id == other.session_id
     }
 }
 
@@ -142,49 +144,71 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
     let is_processing = use_signal(|| false);
     let current_streaming_responses = use_signal(|| HashMap::<String, String>::new());
 
-    // Load history if session_id is provided
+    // Track the currently loaded session to avoid reloading on every render
+    let mut loaded_session_id = use_signal(|| None::<String>);
+    
+    // Load history if session_id changes (not on every render)
     let session_id = props.session_id.clone();
-    use_hook(|| {
-        if let Some(sid) = session_id {
-            if let Ok(session_data) = ChatHistory::load_session(&sid) {
-                if let ChatHistory::Collaborative(history) = session_data.history {
-                    selected_models.set(history.selected_models.clone());
-                    // Convert history rounds to internal format
-                    let converted_rounds: Vec<CollaborativeRound> = history.rounds
-                        .into_iter()
-                        .map(|r| {
-                            // Convert chat_history::ModelResponse to internal ModelResponse
-                            let phase1_responses: Vec<ModelResponse> = r.model_responses
-                                .into_iter()
-                                .map(|mr| ModelResponse {
-                                    model_id: mr.model_id,
-                                    content: mr.content,
-                                    error_message: mr.error_message,
-                                })
-                                .collect();
-                            // For now, we'll reconstruct from the simplified history format
-                            // The history only stores final consensus, so we'll mark as complete
-                            CollaborativeRound {
-                                user_question: r.user_message,
-                                phase1_responses,
-                                phase2_reviews: vec![], // Not stored in simplified format
-                                phase3_consensus: r.final_consensus.as_ref().map(|consensus| ModelResponse {
-                                    model_id: "consensus".to_string(),
-                                    content: consensus.clone(),
-                                    error_message: None,
-                                }),
-                                current_phase: CollaborativePhase::Complete,
-                            }
-                        })
-                        .collect();
-                    conversation_history.set(converted_rounds);
-                    if !history.selected_models.is_empty() {
-                        selection_step.set(1);
+    let should_load = session_id != *loaded_session_id.read();
+    
+    if should_load {
+        loaded_session_id.set(session_id.clone());
+        
+        if let Some(sid) = session_id.clone() {
+            match ChatHistory::load_session(&sid) {
+                Ok(session_data) => {
+                    if let ChatHistory::Collaborative(history) = session_data.history {
+                        selected_models.set(history.selected_models.clone());
+                        // Convert history rounds to internal format
+                        let converted_rounds: Vec<CollaborativeRound> = history.rounds
+                            .into_iter()
+                            .map(|r| {
+                                // Convert chat_history::ModelResponse to internal ModelResponse
+                                let phase1_responses: Vec<ModelResponse> = r.model_responses
+                                    .into_iter()
+                                    .map(|mr| ModelResponse {
+                                        model_id: mr.model_id,
+                                        content: mr.content,
+                                        error_message: mr.error_message,
+                                    })
+                                    .collect();
+                                // For now, we'll reconstruct from the simplified history format
+                                // The history only stores final consensus, so we'll mark as complete
+                                CollaborativeRound {
+                                    user_question: r.user_message,
+                                    phase1_responses,
+                                    phase2_reviews: vec![], // Not stored in simplified format
+                                    phase3_consensus: r.final_consensus.as_ref().map(|consensus| ModelResponse {
+                                        model_id: "consensus".to_string(),
+                                        content: consensus.clone(),
+                                        error_message: None,
+                                    }),
+                                    current_phase: CollaborativePhase::Complete,
+                                }
+                            })
+                            .collect();
+                        conversation_history.set(converted_rounds);
+                        if !history.selected_models.is_empty() {
+                            selection_step.set(1);
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("Failed to load session {}: {}", sid, e);
+                    selected_models.set(Vec::new());
+                    conversation_history.set(Vec::new());
+                    prompt_templates.set(PromptTemplates::default());
+                    selection_step.set(0);
+                }
             }
+        } else {
+            // New session - reset state
+            selected_models.set(Vec::new());
+            conversation_history.set(Vec::new());
+            prompt_templates.set(PromptTemplates::default());
+            selection_step.set(0);
         }
-    });
+    }
 
     // Fetch models on component mount
     let _fetch = use_hook(|| {
@@ -234,7 +258,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
         }
 
         let models = selected_models.read().clone();
-        if models.is_empty() {
+        if models.len() < 2 {
             return;
         }
 
@@ -270,32 +294,52 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                 let initial_prompt = templates.initial_response
                     .replace("{user_question}", &user_msg);
 
-                let messages = vec![ChatMessage::user(initial_prompt)];
+                let messages = vec![
+                    ChatMessage::system("You are part of a collaborative AI workflow. Follow each phase instruction precisely.".to_string()),
+                    ChatMessage::user(initial_prompt),
+                ];
 
                 match client.stream_chat_completion_multi(models.clone(), messages).await {
                     Ok(mut rx) => {
                         let mut done_models = std::collections::HashSet::new();
                         let mut phase1_results: HashMap<String, ModelResponse> = HashMap::new();
 
+                        // Buffer content locally to throttle updates
+                        let mut content_buffer: HashMap<String, String> = HashMap::new();
                         let mut last_update = std::time::Instant::now();
+                        const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
+
                         while let Some(event) = rx.recv().await {
                             let model_id = event.model_id.clone();
 
                             match event.event {
                                 StreamEvent::Content(content) => {
-                                    let mut responses = current_streaming_clone.write();
-                                    responses
+                                    // Accumulate in buffer instead of writing immediately
+                                    content_buffer
                                         .entry(model_id.clone())
                                         .and_modify(|s| s.push_str(&content))
                                         .or_insert(content);
                                     
-                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                    if last_update.elapsed().as_millis() >= 16 {
-                                        tokio::task::yield_now().await;
-                                        last_update = std::time::Instant::now();
-                                    }
+                                        // Throttle updates: only write to signal every 16ms
+                                        if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                            // Flush only the active model to reduce cloning work.
+                                            if let Some(accumulated) = content_buffer.get(&model_id) {
+                                                current_streaming_clone
+                                                    .write()
+                                                    .insert(model_id.clone(), accumulated.clone());
+                                            }
+                                            
+                                            last_update = std::time::Instant::now();
+                                        }
                                 }
                                 StreamEvent::Done => {
+                                    // Flush any remaining buffered content before marking done
+                                    if let Some(accumulated) = content_buffer.remove(&model_id) {
+                                        let mut responses = current_streaming_clone.write();
+                                        responses.insert(model_id.clone(), accumulated.clone());
+                                        drop(responses);
+                                    }
+                                    
                                     let final_content = current_streaming_clone
                                         .read()
                                         .get(&model_id)
@@ -370,25 +414,31 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                     .replace("{user_question}", &user_msg)
                                     .replace("{other_responses}", &other_responses);
 
-                                let review_messages = vec![ChatMessage::user(review_prompt)];
+                                let review_messages = vec![
+                                    ChatMessage::system("You are part of a collaborative AI workflow. Follow each phase instruction precisely.".to_string()),
+                                    ChatMessage::user(review_prompt),
+                                ];
 
                                 match client.stream_chat_completion(model_id.clone(), review_messages).await {
                                     Ok(mut stream) => {
                                         let mut review_content = String::new();
+                                        
+                                        // Throttle updates: only write to signal every 16ms
                                         let mut last_update = std::time::Instant::now();
+                                        const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
 
                                         while let Some(event) = stream.next().await {
                                             match event {
                                                 StreamEvent::Content(content) => {
                                                     review_content.push_str(&content);
-                                                    current_streaming_clone.write().insert(
-                                                        model_id.clone(),
-                                                        review_content.clone(),
-                                                    );
                                                     
-                                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                                    if last_update.elapsed().as_millis() >= 16 {
-                                                        tokio::task::yield_now().await;
+                                                    // Throttle updates: only write to signal every 16ms
+                                                    if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                                        current_streaming_clone.write().insert(
+                                                            model_id.clone(),
+                                                            review_content.clone(),
+                                                        );
+                                                        
                                                         last_update = std::time::Instant::now();
                                                     }
                                                 }
@@ -462,29 +512,41 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                 .replace("{initial_responses}", &initial_responses_text)
                                 .replace("{reviews}", &reviews_text);
 
-                            let consensus_messages = vec![ChatMessage::user(consensus_prompt)];
+                            let consensus_messages = vec![
+                                ChatMessage::system("You are part of a collaborative AI workflow. Follow each phase instruction precisely.".to_string()),
+                                ChatMessage::user(consensus_prompt),
+                            ];
 
                             match client.stream_chat_completion(synthesizer_id.clone(), consensus_messages).await {
                                 Ok(mut stream) => {
                                     let mut consensus_content = String::new();
+                                    
+                                    // Throttle updates: only write to signal every 16ms
                                     let mut last_update = std::time::Instant::now();
+                                    const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
 
                                     while let Some(event) = stream.next().await {
                                         match event {
                                             StreamEvent::Content(content) => {
                                                 consensus_content.push_str(&content);
+                                                
+                                                // Throttle updates: only write to signal every 16ms
+                                                if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                                    current_streaming_clone.write().insert(
+                                                        "consensus".to_string(),
+                                                        consensus_content.clone(),
+                                                    );
+                                                    
+                                                    last_update = std::time::Instant::now();
+                                                }
+                                            }
+                                            StreamEvent::Done => {
+                                                // Flush final content
                                                 current_streaming_clone.write().insert(
                                                     "consensus".to_string(),
                                                     consensus_content.clone(),
                                                 );
                                                 
-                                                // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                                if last_update.elapsed().as_millis() >= 16 {
-                                                    tokio::task::yield_now().await;
-                                                    last_update = std::time::Instant::now();
-                                                }
-                                            }
-                                            StreamEvent::Done => {
                                                 if let Some(last_round) = conversation_history_clone.write().last_mut() {
                                                     last_round.phase3_consensus = Some(ModelResponse {
                                                         model_id: synthesizer_id.clone(),
@@ -564,7 +626,8 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                             let session_data = SessionData {
                                 session,
                                 history: ChatHistory::Collaborative(history),
-                                created_at: ChatHistory::format_timestamp(),
+                                created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                    .unwrap_or_else(ChatHistory::format_timestamp),
                                 updated_at: ChatHistory::format_timestamp(),
                             };
                             
@@ -625,7 +688,8 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                             let session_data = SessionData {
                                 session,
                                 history: ChatHistory::Collaborative(history),
-                                created_at: ChatHistory::format_timestamp(),
+                                created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                    .unwrap_or_else(ChatHistory::format_timestamp),
                                 updated_at: ChatHistory::format_timestamp(),
                             };
                             
@@ -888,18 +952,18 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
 
                 // Chat area
                 div {
-                    class: "flex-1 overflow-y-auto p-4",
+                    class: "flex-1 min-h-0 overflow-y-auto p-4",
 
                     if conversation_history.read().is_empty() {
                         // Empty state
                         div {
                             class: "flex flex-col items-center justify-center h-full",
                             h2 {
-                                class: "text-xl font-bold text-[var(--color-base-content)] mb-2",
+                                class: "text-lg sm:text-xl md:text-2xl font-bold text-[var(--color-base-content)] mb-2",
                                 "🤝 Collaborative Mode Ready"
                             }
                             p {
-                                class: "text-sm text-[var(--color-base-content)]/70 mb-4 text-center max-w-md",
+                                class: "text-sm sm:text-base text-[var(--color-base-content)]/70 mb-4 text-center max-w-md",
                                 "Selected models will work together through three phases: initial responses, cross-review, and consensus synthesis."
                             }
                             div {
@@ -912,7 +976,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                     } else {
                         // Conversation display
                         div {
-                            class: "space-y-8 max-w-6xl mx-auto",
+                            class: "space-y-8 w-full",
 
                             for (round_idx, round) in conversation_history.read().iter().enumerate() {
                                 div {
@@ -922,7 +986,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                     div {
                                         class: "flex justify-end mb-4",
                                         div {
-                                            class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
+                                            class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-3 sm:px-4 md:px-5 py-2 sm:py-3 rounded-lg text-sm sm:text-base",
                                             FormattedText {
                                                 theme,
                                                 content: round.user_question.clone(),
@@ -1123,9 +1187,9 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
 
                                                 div {
                                                     class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
-                                                    FormattedText {
-                                                        theme,
-                                                        content: content.clone(),
+                                                    div {
+                                                        class: "whitespace-pre-wrap break-words",
+                                                        "{content}"
                                                     }
                                                 }
                                             }

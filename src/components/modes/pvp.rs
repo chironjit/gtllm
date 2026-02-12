@@ -57,7 +57,9 @@ pub struct PvPProps {
 
 impl PartialEq for PvPProps {
     fn eq(&self, other: &Self) -> bool {
-        self.theme == other.theme && self.input_settings == other.input_settings
+        self.theme == other.theme 
+            && self.input_settings == other.input_settings
+            && self.session_id == other.session_id
     }
 }
 
@@ -91,52 +93,76 @@ pub fn PvP(props: PvPProps) -> Element {
     let mut editing_prompt_target = use_signal(|| PromptEditTarget::Bot);
     let mut temp_prompt = use_signal(String::new);
     
-    // Load history if session_id is provided
+    // Track the currently loaded session to avoid reloading on every render
+    let mut loaded_session_id = use_signal(|| None::<String>);
+    
+    // Load history if session_id changes (not on every render)
     let session_id = props.session_id.clone();
-    use_hook(|| {
-        if let Some(sid) = session_id {
-            if let Ok(session_data) = ChatHistory::load_session(&sid) {
-                if let ChatHistory::PvP(history) = session_data.history {
-                    let bot_models_clone = history.bot_models.clone();
-                    let moderator_model_clone = history.moderator_model.clone();
-                    bot_models.set(bot_models_clone.clone());
-                    moderator_model.set(moderator_model_clone.clone());
-                    system_prompts.set(SystemPrompts {
-                        bot: history.system_prompts.bot,
-                        moderator: history.system_prompts.moderator,
-                    });
-                    
-                    // Convert rounds from history to internal format
-                    let converted_rounds: Vec<ConversationRound> = history.rounds
-                        .into_iter()
-                        .map(|r| ConversationRound {
-                            user_message: r.user_message,
-                            bot1_response: BotResponse {
-                                model_id: r.bot1_response.model_id,
-                                content: r.bot1_response.content,
-                                error_message: r.bot1_response.error_message,
-                            },
-                            bot2_response: BotResponse {
-                                model_id: r.bot2_response.model_id,
-                                content: r.bot2_response.content,
-                                error_message: r.bot2_response.error_message,
-                            },
-                            moderator_judgment: r.moderator_judgment.map(|m| ModeratorResponse {
-                                content: m.content,
-                                error_message: m.error_message,
-                            }),
-                        })
-                        .collect();
-                    conversation_history.set(converted_rounds);
-                    
-                    // If models are loaded, go to chat step
-                    if !bot_models_clone.is_empty() && moderator_model_clone.is_some() {
-                        selection_step.set(2);
+    let should_load = session_id != *loaded_session_id.read();
+    
+    if should_load {
+        loaded_session_id.set(session_id.clone());
+        
+        if let Some(sid) = session_id.clone() {
+            match ChatHistory::load_session(&sid) {
+                Ok(session_data) => {
+                    if let ChatHistory::PvP(history) = session_data.history {
+                        let bot_models_clone = history.bot_models.clone();
+                        let moderator_model_clone = history.moderator_model.clone();
+                        bot_models.set(bot_models_clone.clone());
+                        moderator_model.set(moderator_model_clone.clone());
+                        system_prompts.set(SystemPrompts {
+                            bot: history.system_prompts.bot,
+                            moderator: history.system_prompts.moderator,
+                        });
+                        
+                        // Convert rounds from history to internal format
+                        let converted_rounds: Vec<ConversationRound> = history.rounds
+                            .into_iter()
+                            .map(|r| ConversationRound {
+                                user_message: r.user_message,
+                                bot1_response: BotResponse {
+                                    model_id: r.bot1_response.model_id,
+                                    content: r.bot1_response.content,
+                                    error_message: r.bot1_response.error_message,
+                                },
+                                bot2_response: BotResponse {
+                                    model_id: r.bot2_response.model_id,
+                                    content: r.bot2_response.content,
+                                    error_message: r.bot2_response.error_message,
+                                },
+                                moderator_judgment: r.moderator_judgment.map(|m| ModeratorResponse {
+                                    content: m.content,
+                                    error_message: m.error_message,
+                                }),
+                            })
+                            .collect();
+                        conversation_history.set(converted_rounds);
+                        
+                        // Only enter chat if configuration is complete.
+                        if bot_models_clone.len() == 2 && moderator_model_clone.is_some() {
+                            selection_step.set(2);
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("Failed to load session {}: {}", sid, e);
+                    bot_models.set(Vec::new());
+                    moderator_model.set(None);
+                    conversation_history.set(Vec::new());
+                    system_prompts.set(SystemPrompts::default());
+                    selection_step.set(0);
+                }
             }
+        } else {
+            // New session - reset state
+            bot_models.set(Vec::new());
+            moderator_model.set(None);
+            conversation_history.set(Vec::new());
+            system_prompts.set(SystemPrompts::default());
+            selection_step.set(0);
         }
-    });
+    }
 
     // Fetch models on component mount
     let _fetch = use_hook(|| {
@@ -217,9 +243,16 @@ pub fn PvP(props: PvPProps) -> Element {
             return;
         }
 
+        if bot_models.read().len() != 2 {
+            return;
+        }
+
         let bot1_id = bot_models.read()[0].clone();
         let bot2_id = bot_models.read()[1].clone();
-        let mod_id = moderator_model.read().clone().unwrap();
+        let mod_id = match moderator_model.read().clone() {
+            Some(model) => model,
+            None => return,
+        };
 
         if let Some(client_arc) = &client_for_send {
             let client = client_arc.clone();
@@ -266,26 +299,41 @@ pub fn PvP(props: PvPProps) -> Element {
                     Ok(mut rx) => {
                         let mut done_bots = std::collections::HashSet::new();
 
-                        // Collect bot responses
+                        // Buffer content locally to throttle updates
+                        let mut content_buffer: HashMap<String, String> = HashMap::new();
                         let mut last_update = std::time::Instant::now();
+                        const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
+
                         while let Some(event) = rx.recv().await {
                             let model_id = event.model_id.clone();
 
                             match event.event {
                                 StreamEvent::Content(content) => {
-                                    let mut responses = current_bot_responses_clone.write();
-                                    responses
+                                    // Accumulate in buffer instead of writing immediately
+                                    content_buffer
                                         .entry(model_id.clone())
                                         .and_modify(|s| s.push_str(&content))
                                         .or_insert(content);
                                     
-                                    // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                    if last_update.elapsed().as_millis() >= 16 {
-                                        tokio::task::yield_now().await;
+                                    // Throttle updates: only write to signal every 16ms
+                                    if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                        // Flush only the active model to reduce cloning work.
+                                        if let Some(accumulated) = content_buffer.get(&model_id) {
+                                            current_bot_responses_clone
+                                                .write()
+                                                .insert(model_id.clone(), accumulated.clone());
+                                        }
+                                        
                                         last_update = std::time::Instant::now();
                                     }
                                 }
                                 StreamEvent::Done => {
+                                    // Flush any remaining buffered content before marking done
+                                    if let Some(accumulated) = content_buffer.remove(&model_id) {
+                                        let mut responses = current_bot_responses_clone.write();
+                                        responses.insert(model_id.clone(), accumulated);
+                                    }
+                                    
                                     done_bots.insert(model_id);
 
                                     // Check if both bots are done
@@ -351,21 +399,27 @@ pub fn PvP(props: PvPProps) -> Element {
                                             match client.stream_chat_completion(mod_id.clone(), moderator_messages).await {
                                                 Ok(mut stream) => {
                                                     let mut mod_content = String::new();
+                                                    
+                                                    // Throttle updates: only write to signal every 16ms
                                                     let mut last_update = std::time::Instant::now();
+                                                    const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
 
                                                     while let Some(event) = stream.next().await {
                                                         match event {
                                                             StreamEvent::Content(content) => {
                                                                 mod_content.push_str(&content);
-                                                                current_moderator_response_clone.set(mod_content.clone());
                                                                 
-                                                                // Yield to UI thread every ~16ms (60fps) to prevent blocking
-                                                                if last_update.elapsed().as_millis() >= 16 {
-                                                                    tokio::task::yield_now().await;
+                                                                // Throttle updates: only write to signal every 16ms
+                                                                if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                                                    current_moderator_response_clone.set(mod_content.clone());
+                                                                    
                                                                     last_update = std::time::Instant::now();
                                                                 }
                                                             }
                                                             StreamEvent::Done => {
+                                                                // Flush final content
+                                                                current_moderator_response_clone.set(mod_content.clone());
+                                                                
                                                                 // Update the last conversation round with moderator response
                                                                 if let Some(last_round) = conversation_history_clone.write().last_mut() {
                                                                     last_round.moderator_judgment = Some(ModeratorResponse {
@@ -417,7 +471,8 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                     let session_data = SessionData {
                                                                         session,
                                                                         history: ChatHistory::PvP(history),
-                                                                        created_at: ChatHistory::format_timestamp(),
+                                                                        created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                                                            .unwrap_or_else(ChatHistory::format_timestamp),
                                                                         updated_at: ChatHistory::format_timestamp(),
                                                                     };
                                                                     
@@ -837,27 +892,27 @@ pub fn PvP(props: PvPProps) -> Element {
                 
                 // Chat interface
                 div {
-                    class: "flex-1 overflow-y-auto p-4",
+                    class: "flex-1 min-h-0 overflow-y-auto p-4",
 
                     if conversation_history.read().is_empty() {
                         // Empty state
                         div {
                             class: "flex flex-col items-center justify-center h-full",
                             h2 {
-                                class: "text-xl font-bold text-[var(--color-base-content)] mb-2",
+                                class: "text-lg sm:text-xl md:text-2xl font-bold text-[var(--color-base-content)] mb-2",
                                 "PvP Arena Ready"
                             }
                             p {
-                                class: "text-sm text-[var(--color-base-content)]/70 mb-2",
+                                class: "text-sm sm:text-base text-[var(--color-base-content)]/70 mb-2",
                                 "Competitor 1: {bot_models.read()[0]}"
                             }
                             p {
-                                class: "text-sm text-[var(--color-base-content)]/70 mb-2",
+                                class: "text-sm sm:text-base text-[var(--color-base-content)]/70 mb-2",
                                 "Competitor 2: {bot_models.read()[1]}"
                             }
                             p {
-                                class: "text-sm text-[var(--color-base-content)]/70 mb-4",
-                                "Moderator: {moderator_model.read().as_ref().unwrap()}"
+                                class: "text-sm sm:text-base text-[var(--color-base-content)]/70 mb-4",
+                                "Moderator: {moderator_model.read().as_deref().unwrap_or(\"Not selected\")}"
                             }
                             button {
                                 onclick: move |_| { selection_step.set(0); conversation_history.write().clear(); },
@@ -868,7 +923,7 @@ pub fn PvP(props: PvPProps) -> Element {
                     } else {
                         // Conversation display
                         div {
-                            class: "space-y-6 max-w-6xl mx-auto",
+                            class: "space-y-6 w-full",
 
                             for (idx, round) in conversation_history.read().iter().enumerate() {
                                 div {
@@ -878,7 +933,7 @@ pub fn PvP(props: PvPProps) -> Element {
                                     div {
                                         class: "flex justify-end mb-4",
                                         div {
-                                            class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-4 py-2 rounded-lg",
+                                            class: "max-w-[85%] bg-[var(--color-primary)] text-[var(--color-primary-content)] px-3 sm:px-4 md:px-5 py-2 sm:py-3 rounded-lg text-sm sm:text-base",
                                             FormattedText {
                                                 theme,
                                                 content: round.user_message.clone(),
@@ -888,27 +943,27 @@ pub fn PvP(props: PvPProps) -> Element {
 
                                     // Bot responses in a grid
                                     div {
-                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3 mb-4",
+                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 w-full",
 
                                         // Bot 1
                                         div {
                                             class: if round.bot1_response.error_message.is_some() {
-                                                "bg-red-500/10 rounded-lg p-4 border-2 border-red-500/50"
+                                                "bg-red-500/10 rounded-lg p-3 sm:p-4 border-2 border-red-500/50"
                                             } else {
-                                                "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]"
+                                                "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)]"
                                             },
                                             div {
-                                                class: "text-sm font-bold text-[var(--color-base-content)] mb-2 truncate",
+                                                class: "text-sm sm:text-base font-bold text-[var(--color-base-content)] mb-2 truncate",
                                                 "{round.bot1_response.model_id}"
                                             }
                                             if let Some(error) = &round.bot1_response.error_message {
                                                 div {
-                                                    class: "text-sm text-red-500",
+                                                    class: "text-sm sm:text-base text-red-500",
                                                     "Error: {error}"
                                                 }
                                             } else {
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)]",
+                                                    class: "text-sm sm:text-base text-[var(--color-base-content)]",
                                                     FormattedText {
                                                         theme,
                                                         content: round.bot1_response.content.clone(),
@@ -920,22 +975,22 @@ pub fn PvP(props: PvPProps) -> Element {
                                         // Bot 2
                                         div {
                                             class: if round.bot2_response.error_message.is_some() {
-                                                "bg-red-500/10 rounded-lg p-4 border-2 border-red-500/50"
+                                                "bg-red-500/10 rounded-lg p-3 sm:p-4 border-2 border-red-500/50"
                                             } else {
-                                                "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]"
+                                                "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)]"
                                             },
                                             div {
-                                                class: "text-sm font-bold text-[var(--color-base-content)] mb-2 truncate",
+                                                class: "text-sm sm:text-base font-bold text-[var(--color-base-content)] mb-2 truncate",
                                                 "{round.bot2_response.model_id}"
                                             }
                                             if let Some(error) = &round.bot2_response.error_message {
                                                 div {
-                                                    class: "text-sm text-red-500",
+                                                    class: "text-sm sm:text-base text-red-500",
                                                     "Error: {error}"
                                                 }
                                             } else {
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)]",
+                                                    class: "text-sm sm:text-base text-[var(--color-base-content)]",
                                                     FormattedText {
                                                         theme,
                                                         content: round.bot2_response.content.clone(),
@@ -949,22 +1004,22 @@ pub fn PvP(props: PvPProps) -> Element {
                                     if let Some(judgment) = &round.moderator_judgment {
                                         div {
                                             class: if judgment.error_message.is_some() {
-                                                "bg-red-500/10 rounded-lg p-4 border-2 border-red-500/50"
+                                                "bg-red-500/10 rounded-lg p-3 sm:p-4 border-2 border-red-500/50"
                                             } else {
-                                                "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]"
+                                                "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)]"
                                             },
                                             div {
-                                                class: "text-sm font-bold text-[var(--color-base-content)] mb-2",
-                                                "Moderator Judgment ({moderator_model.read().as_ref().unwrap()})"
+                                                class: "text-sm sm:text-base font-bold text-[var(--color-base-content)] mb-2",
+                                                "Moderator Judgment ({moderator_model.read().as_deref().unwrap_or(\"Not selected\")})"
                                             }
                                             if let Some(error) = &judgment.error_message {
                                                 div {
-                                                    class: "text-sm text-red-500",
+                                                    class: "text-sm sm:text-base text-red-500",
                                                     "Error: {error}"
                                                 }
                                             } else {
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)]",
+                                                    class: "text-sm sm:text-base text-[var(--color-base-content)]",
                                                     FormattedText {
                                                         theme,
                                                         content: judgment.content.clone(),
@@ -985,38 +1040,38 @@ pub fn PvP(props: PvPProps) -> Element {
 
                                             // Bot 1 streaming
                                             div {
-                                                class: "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]",
+                                                class: "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)]",
                                                 div {
-                                                    class: "text-sm font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2 truncate",
+                                                    class: "text-sm sm:text-base font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2 truncate",
                                                     span { "{bot_models.read()[0]}" }
                                                     span {
                                                         class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse flex-shrink-0"
                                                     }
                                                 }
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
-                                                    FormattedText {
-                                                        theme,
-                                                        content: current_bot_responses.read().get(&bot_models.read()[0]).cloned().unwrap_or_default(),
+                                                    class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem]",
+                                                    div {
+                                                        class: "whitespace-pre-wrap break-words",
+                                                        "{current_bot_responses.read().get(&bot_models.read()[0]).cloned().unwrap_or_default()}"
                                                     }
                                                 }
                                             }
 
                                             // Bot 2 streaming
                                             div {
-                                                class: "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]",
+                                                class: "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)]",
                                                 div {
-                                                    class: "text-sm font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2 truncate",
+                                                    class: "text-sm sm:text-base font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2 truncate",
                                                     span { "{bot_models.read()[1]}" }
                                                     span {
                                                         class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse flex-shrink-0"
                                                     }
                                                 }
                                                 div {
-                                                    class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
-                                                    FormattedText {
-                                                        theme,
-                                                        content: current_bot_responses.read().get(&bot_models.read()[1]).cloned().unwrap_or_default(),
+                                                    class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem]",
+                                                    div {
+                                                        class: "whitespace-pre-wrap break-words",
+                                                        "{current_bot_responses.read().get(&bot_models.read()[1]).cloned().unwrap_or_default()}"
                                                     }
                                                 }
                                             }
@@ -1025,19 +1080,19 @@ pub fn PvP(props: PvPProps) -> Element {
 
                                     if *is_streaming_moderator.read() {
                                         div {
-                                            class: "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]",
+                                            class: "bg-[var(--color-base-200)] rounded-lg p-3 sm:p-4 border border-[var(--color-base-300)]",
                                             div {
-                                                class: "text-sm font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2",
-                                                span { "Moderator Judgment ({moderator_model.read().as_ref().unwrap()})" }
+                                                class: "text-sm sm:text-base font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2",
+                                                span { "Moderator Judgment ({moderator_model.read().as_deref().unwrap_or(\"Not selected\")})" }
                                                 span {
                                                     class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
                                                 }
                                             }
                                             div {
-                                                class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
-                                                FormattedText {
-                                                    theme,
-                                                    content: current_moderator_response.clone(),
+                                                class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem]",
+                                                div {
+                                                    class: "whitespace-pre-wrap break-words",
+                                                    "{current_moderator_response()}"
                                                 }
                                             }
                                         }

@@ -1,0 +1,24 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g1" x1="32" y1="32" x2="224" y2="224" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5B8CFF"/>
+      <stop offset="100%" stop-color="#7C4DFF"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="64" y1="48" x2="192" y2="208" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2DD4BF"/>
+      <stop offset="100%" stop-color="#22C55E"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded square -->
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="url(#g1)"/>
+
+  <!-- Front chat bubble -->
+  <path d="M72 96C72 85 81 76 92 76H164C175 76 184 85 184 96V156C184 167 175 176 164 176H120L88 204V176H92C81 176 72 167 72 156V96Z"
+        fill="url(#g2)" opacity="0.95"/>
+
+  <!-- Subtle dots to suggest multiple LLMs -->
+  <circle cx="104" cy="114" r="6" fill="#0F172A" opacity="0.15"/>
+  <circle cx="128" cy="114" r="6" fill="#0F172A" opacity="0.15"/>
+  <circle cx="152" cy="114" r="6" fill="#0F172A" opacity="0.15"/>
+</svg>
