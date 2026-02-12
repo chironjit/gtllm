@@ -254,7 +254,8 @@ impl ChatHistory {
         }
         
         // Rest is title (may contain underscores)
-        let title = parts[timestamp_idx + 1..].join("_");
+        // Replace underscores with spaces for better display
+        let title = parts[timestamp_idx + 1..].join(" ");
         
         Some((mode, timestamp.to_string(), title))
     }
@@ -298,20 +299,24 @@ impl ChatHistory {
                     }
                     seen_ids.insert(session_id.clone());
 
-                    match Self::load_session_file(&path) {
-                        Ok(mut data) => {
-                            data.session.id = session_id.clone();
-                            sessions.push(data.session);
-                        }
-                        Err(_) => {
-                            // Fallback to filename metadata for backward compatibility.
-                            if let Some((mode, timestamp, title)) = Self::parse_filename(file_name) {
-                                sessions.push(ChatSession {
-                                    id: session_id,
-                                    title,
-                                    mode,
-                                    timestamp,
-                                });
+                    // Optimization: Try to parse metadata from filename first to avoid reading file content
+                    if let Some((mode, timestamp, title)) = Self::parse_filename(file_name) {
+                        sessions.push(ChatSession {
+                            id: session_id,
+                            title,
+                            mode,
+                            timestamp,
+                        });
+                    } else {
+                        // Fallback: Load file only if filename parsing fails
+                        match Self::load_session_file(&path) {
+                            Ok(mut data) => {
+                                data.session.id = session_id.clone();
+                                sessions.push(data.session);
+                            }
+                            Err(_) => {
+                                // Skip invalid files
+                                continue;
                             }
                         }
                     }

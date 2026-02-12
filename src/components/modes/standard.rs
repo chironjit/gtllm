@@ -103,30 +103,48 @@ pub fn Standard(props: StandardProps) -> Element {
     // Track the currently loaded session to avoid reloading on every render
     let mut loaded_session_id = use_signal(|| None::<String>);
     
-    // Load history if session_id changes (not on every render)
+    // Load history if session_id changes
     let session_id = props.session_id.clone();
-    let should_load = session_id != *loaded_session_id.read();
     
-    if should_load {
-        loaded_session_id.set(session_id.clone());
-        
-        if let Some(sid) = session_id.clone() {
-            match ChatHistory::load_session(&sid) {
+    // Use resource for async loading
+    let _session_loader = use_resource(move || {
+        let session_id = session_id.clone();
+        async move {
+            if let Some(sid) = session_id {
+                // Run file I/O in a blocking task
+                let result = tokio::task::spawn_blocking(move || ChatHistory::load_session(&sid)).await;
+                match result {
+                    Ok(Ok(session_data)) => Some(Ok(session_data)),
+                    Ok(Err(e)) => Some(Err(e)),
+                    Err(e) => Some(Err(format!("Task join error: {}", e))),
+                }
+            } else {
+                None
+            }
+        }
+    });
+
+    // Update state when resource is ready
+    if let Some(Some(result)) = _session_loader.read().as_ref() {
+        let current_sid = props.session_id.clone();
+        if current_sid != *loaded_session_id.read() {
+            match result {
                 Ok(session_data) => {
-                    if let ChatHistory::Standard(history) = session_data.history {
-                        selected_models.set(history.selected_models);
-                        user_messages.set(history.user_messages);
-                        system_prompt.set(history.system_prompt);
+                    if let ChatHistory::Standard(history) = &session_data.history {
+                        loaded_session_id.set(current_sid);
+                        selected_models.set(history.selected_models.clone());
+                        user_messages.set(history.user_messages.clone());
+                        system_prompt.set(history.system_prompt.clone());
                         
                         // Convert ModelResponse from history to internal format
                         let converted_responses: Vec<Vec<ModelResponse>> = history.model_responses
-                            .into_iter()
+                            .iter()
                             .map(|responses| {
-                                responses.into_iter()
+                                responses.iter()
                                     .map(|r| ModelResponse {
-                                        model_id: r.model_id,
-                                        content: r.content,
-                                        error_message: r.error_message,
+                                        model_id: r.model_id.clone(),
+                                        content: r.content.clone(),
+                                        error_message: r.error_message.clone(),
                                         metrics: None, // Historical responses don't have metrics
                                     })
                                     .collect()
@@ -136,13 +154,14 @@ pub fn Standard(props: StandardProps) -> Element {
                         
                         // Convert ConversationHistory
                         conversation_history.set(ConversationHistory {
-                            single_model: history.conversation_history.single_model,
-                            multi_model: history.conversation_history.multi_model,
+                            single_model: history.conversation_history.single_model.clone(),
+                            multi_model: history.conversation_history.multi_model.clone(),
                         });
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to load session {}: {}", sid, e);
+                    eprintln!("Failed to load session: {}", e);
+                    loaded_session_id.set(current_sid);
                     selected_models.set(Vec::new());
                     user_messages.set(Vec::new());
                     model_responses.set(Vec::new());
@@ -153,17 +172,18 @@ pub fn Standard(props: StandardProps) -> Element {
                     });
                 }
             }
-        } else {
-            // New session - reset state
-            selected_models.set(Vec::new());
-            user_messages.set(Vec::new());
-            model_responses.set(Vec::new());
-            system_prompt.set("You are a helpful AI assistant.".to_string());
-            conversation_history.set(ConversationHistory {
-                single_model: Vec::new(),
-                multi_model: HashMap::new(),
-            });
         }
+    } else if props.session_id.is_none() && loaded_session_id.read().is_some() {
+        // Reset for new session
+        loaded_session_id.set(None);
+        selected_models.set(Vec::new());
+        user_messages.set(Vec::new());
+        model_responses.set(Vec::new());
+        system_prompt.set("You are a helpful AI assistant.".to_string());
+        conversation_history.set(ConversationHistory {
+            single_model: Vec::new(),
+            multi_model: HashMap::new(),
+        });
     }
     
 
@@ -513,8 +533,10 @@ pub fn Standard(props: StandardProps) -> Element {
                         updated_at: ChatHistory::format_timestamp(),
                     };
                     
-                    if let Err(e) = ChatHistory::save_session(&session_data) {
-                        eprintln!("Failed to save session: {}", e);
+                    match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
+                        Err(e) => eprintln!("Failed to save session task: {}", e),
+                        Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
+                        Ok(Ok(_)) => {}
                     }
                 }
             });

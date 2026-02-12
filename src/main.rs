@@ -73,6 +73,9 @@ fn App() -> Element {
         ctrl_enter_submit: true,
     });
 
+    // Global loading state
+    let mut is_loading = use_signal(|| false);
+
     // Message counter for IDs
     let mut message_counter = use_signal(|| 0);
 
@@ -140,55 +143,115 @@ fn App() -> Element {
     // Handler for selecting a session
     let select_session = {
         let mut sessions_clone = sessions.clone();
+        let mut current_session = current_session.clone();
+        let mut current_view = current_view.clone();
+        let mut messages = messages.clone();
+        let mut arena_messages = arena_messages.clone();
+        let mut is_loading = is_loading.clone();
+        
         move |session_id: String| {
-            // Refresh sessions list first to ensure we have the latest data
-            match ChatHistory::list_sessions() {
-                Ok(new_sessions) => {
-                    sessions_clone.set(new_sessions);
+            is_loading.set(true);
+            let session_id = session_id.clone();
+            let mut sessions_clone = sessions_clone.clone();
+            let mut current_session = current_session.clone();
+            let mut current_view = current_view.clone();
+            let mut messages = messages.clone();
+            let mut arena_messages = arena_messages.clone();
+            let mut is_loading = is_loading.clone();
+
+            spawn(async move {
+                // Small delay to ensure UI updates with loading state
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                // Refresh sessions list first to ensure we have the latest data
+                // We run this in a blocking task to avoid blocking the UI thread
+                let sessions_result = tokio::task::spawn_blocking(|| ChatHistory::list_sessions()).await;
+                
+                match sessions_result {
+                    Ok(Ok(new_sessions)) => {
+                        sessions_clone.set(new_sessions);
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("Failed to refresh sessions: {}", e);
+                    }
+                    Err(e) => {
+                        eprintln!("Task join error: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to refresh sessions: {}", e);
-                }
-            }
-            
-            // Try to find the session in the refreshed list
-            let session_opt = sessions_clone.read().iter().find(|s| s.id == session_id).cloned();
-            if let Some(session) = session_opt {
-                // Verify the file actually exists before trying to load
-                if ChatHistory::session_path(&session_id).is_ok() {
-                    current_session.set(Some(session_id.clone()));
-                    current_view.set(AppView::ChatMode(session.mode));
-                    // Messages will be loaded by the mode component itself
-                    messages.write().clear();
-                    arena_messages.write().clear();
+                
+                // Try to find the session in the refreshed list
+                let session_opt = sessions_clone.read().iter().find(|s| s.id == session_id).cloned();
+                
+                if let Some(session) = session_opt {
+                    // Check file existence
+                    let session_path_exists = tokio::task::spawn_blocking(move || {
+                        ChatHistory::session_path(&session_id).is_ok()
+                    }).await.unwrap_or(false);
+
+                    if session_path_exists {
+                        current_session.set(Some(session.id.clone()));
+                        current_view.set(AppView::ChatMode(session.mode));
+                        // Messages will be loaded by the mode component itself
+                        messages.write().clear();
+                        arena_messages.write().clear();
+                    } else {
+                        eprintln!("Session file not found: {}", session.id);
+                        // Remove invalid session from list
+                        sessions_clone.write().retain(|s| s.id != session.id);
+                    }
                 } else {
-                    eprintln!("Session file not found: {}", session_id);
-                    // Remove invalid session from list
-                    sessions_clone.write().retain(|s| s.id != session_id);
+                    eprintln!("Session not found in list");
                 }
-            } else {
-                eprintln!("Session not found in list: {}", session_id);
-            }
+                
+                is_loading.set(false);
+            });
         }
     };
 
     // Handler for creating new chat
     let new_chat = {
         let mut sessions_clone = sessions.clone();
+        let mut current_view = current_view.clone();
+        let mut messages = messages.clone();
+        let mut arena_messages = arena_messages.clone();
+        let mut current_session = current_session.clone();
+        let mut is_loading = is_loading.clone();
+
         move |_| {
-            current_view.set(AppView::NewChat);
-            messages.write().clear();
-            arena_messages.write().clear();
-            current_session.set(None);
-            // Refresh sessions list to pick up any new or renamed sessions
-            match ChatHistory::list_sessions() {
-                Ok(new_sessions) => {
-                    sessions_clone.set(new_sessions);
+            is_loading.set(true);
+            let mut sessions_clone = sessions_clone.clone();
+            let mut current_view = current_view.clone();
+            let mut messages = messages.clone();
+            let mut arena_messages = arena_messages.clone();
+            let mut current_session = current_session.clone();
+            let mut is_loading = is_loading.clone();
+
+            spawn(async move {
+                // Small delay to ensure UI updates
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                current_view.set(AppView::NewChat);
+                messages.write().clear();
+                arena_messages.write().clear();
+                current_session.set(None);
+                
+                // Refresh sessions list to pick up any new or renamed sessions
+                let sessions_result = tokio::task::spawn_blocking(|| ChatHistory::list_sessions()).await;
+                
+                match sessions_result {
+                    Ok(Ok(new_sessions)) => {
+                        sessions_clone.set(new_sessions);
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("Failed to refresh sessions: {}", e);
+                    }
+                    Err(e) => {
+                        eprintln!("Task join error: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to refresh sessions: {}", e);
-                }
-            }
+                
+                is_loading.set(false);
+            });
         }
     };
 
@@ -385,7 +448,7 @@ fn App() -> Element {
             class: "font-inter antialiased bg-[var(--color-base-100)] text-[var(--color-base-content)]",
 
             div {
-                class: "flex h-screen overflow-hidden",
+                class: "flex h-screen overflow-hidden relative",
 
                 // Sidebar
                 Sidebar {
@@ -478,6 +541,23 @@ fn App() -> Element {
                                     on_close: close_settings,
                                 }
                             },
+                        }
+                    }
+                }
+                
+                // Loading Overlay
+                if *is_loading.read() {
+                    div {
+                        class: "absolute inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm",
+                        div {
+                            class: "bg-[var(--color-base-100)] p-6 rounded-xl shadow-2xl flex flex-col items-center gap-4 border border-[var(--color-base-300)]",
+                            div {
+                                class: "w-12 h-12 border-4 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin"
+                            }
+                            div {
+                                class: "text-lg font-medium text-[var(--color-base-content)]",
+                                "Loading..."
+                            }
                         }
                     }
                 }
