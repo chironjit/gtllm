@@ -1,0 +1,131 @@
+# Build AppImage and attach to GitHub Release when the release doesn't already
+# have an AppImage for the version in Cargo.toml.
+name: Release AppImage
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-appimage:
+    runs-on: ubuntu-18.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      skip: ${{ steps.check.outputs.skip }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' Cargo.toml)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Cargo.toml version: $VERSION"
+
+      - name: Check if release already has matching AppImage
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null || true)
+          # Skip if any asset looks like our AppImage for this version (e.g. gtllm-0.1.0-x86_64.AppImage)
+          if echo "$ASSETS" | grep -qE "gtllm[-_]?${VERSION}.*\.AppImage|.*${VERSION}.*x86_64\.AppImage"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Release $TAG already has an AppImage for version $VERSION, skipping build."
+            exit 0
+          fi
+          if echo "$ASSETS" | grep -qE ".*${VERSION}.*\.AppImage"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Release $TAG already has an AppImage for version $VERSION, skipping build."
+            exit 0
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "No AppImage for version $VERSION found on release $TAG, will build."
+
+  appimage:
+    needs: build-appimage
+    if: needs.build-appimage.outputs.skip != 'true'
+    runs-on: ubuntu-18.04
+    permissions:
+      contents: write  # upload release assets
+
+    steps:
+      - name: Checkout repository (at release tag)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: appimage-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            appimage-${{ runner.os }}-cargo-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libappindicator3-dev \
+            patchelf \
+            fuse
+          sudo modprobe fuse || true
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' Cargo.toml)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building for version: $VERSION"
+
+      - name: Build AppImage
+        run: dx bundle --platform linux --package-types appimage --release
+
+      - name: Find and rename AppImage
+        id: artifact
+        run: |
+          APPIMAGE=$(find target -name "*.AppImage" -type f | head -1)
+          if [ -z "$APPIMAGE" ]; then
+            echo "No .AppImage file found under target/"
+            find target -type f -name "*.AppImage" 2>/dev/null || true
+            exit 1
+          fi
+          VERSION="${{ steps.version.outputs.version }}"
+          DIR=$(dirname "$APPIMAGE")
+          NEW_NAME="gtllm-${VERSION}-x86_64.AppImage"
+          cp "$APPIMAGE" "$DIR/$NEW_NAME"
+          echo "path=$DIR/$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "name=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "Uploading: $NEW_NAME"
+
+      - name: Upload AppImage to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release upload "$TAG" "${{ steps.artifact.outputs.path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          echo "Uploaded ${{ steps.artifact.outputs.name }} to release $TAG"

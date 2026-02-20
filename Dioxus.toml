@@ -26,7 +26,14 @@ script = []
 script = []
 
 [bundle]
-identifier = "com.chironjit.gtllm"
+identifier = "com.gtllm.gtllm"
 publisher = "Chironjit Das"
+# Square PNG for AppImage/Linux; used for app icon in installers and menus
+icon = ["assets/icon.png"]
+copyright = "Chironjit Das"
+# Desktop categories: https://specifications.freedesktop.org/menu-spec/latest/apa.html
+category = "Utility"
+short_description = "Multi-LLM chat with PvP, collaborative, and competitive modes"
+long_description = "GTLLM is a desktop app for multi-LLM conversations inspired by game theory: PvP (2 LLMs + moderator), collaborative (LLMs agree on one solution), competitive (LLMs vote, can't vote for their own), and LLM's Choice. Uses OpenRouter; requires your own API key (set in Settings)."
 
 
