@@ -497,7 +497,7 @@ pub fn Standard(props: StandardProps) -> Element {
                 current_streaming_responses_clone.write().clear();
                 is_streaming_clone.set(false);
                 
-                // Auto-save when there is content (use cloned signals so we see current state)
+                // Auto-save only when there is content (spawn_blocking + cloned signals for current state)
                 if let Some(sid) = session_id_for_save {
                     let history = StandardHistory {
                         user_messages: user_messages_save.read().clone(),

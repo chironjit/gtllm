@@ -595,7 +595,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             conversation_history_clone.write().push(round);
             is_processing_clone.set(false);
             
-            // Auto-save only when there is content
+            // Auto-save only when there is content (spawn_blocking to avoid blocking async runtime)
             if let Some(sid) = session_id_for_save {
                 let history = CompetitiveHistory {
                     rounds: conversation_history_clone.read().iter()
@@ -654,8 +654,10 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                             .unwrap_or_else(ChatHistory::format_timestamp),
                         updated_at: ChatHistory::format_timestamp(),
                     };
-                    if ChatHistory::save_session(&session_data).is_ok() {
-                        on_session_saved.call(session);
+                    match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
+                        Err(e) => eprintln!("Failed to save session task: {}", e),
+                        Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
+                        Ok(Ok(_)) => on_session_saved.call(session),
                     }
                 }
             }

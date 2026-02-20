@@ -432,7 +432,7 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                 current_moderator_response_clone.set(String::new());
                                                                 is_streaming_moderator_clone.set(false);
                                                                 
-                                                                // Auto-save only when there is content
+                                                                // Auto-save only when there is content (spawn_blocking to avoid blocking async runtime)
                                                                 if let Some(sid) = session_id_for_save {
                                                                     let history = PvPHistory {
                                                                         rounds: conversation_history_clone.read().iter()
@@ -477,8 +477,10 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                                 .unwrap_or_else(ChatHistory::format_timestamp),
                                                                             updated_at: ChatHistory::format_timestamp(),
                                                                         };
-                                                                        if ChatHistory::save_session(&session_data).is_ok() {
-                                                                            on_session_saved.call(session);
+                                                                        match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
+                                                                            Err(e) => eprintln!("Failed to save session task: {}", e),
+                                                                            Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
+                                                                            Ok(Ok(_)) => on_session_saved.call(session),
                                                                         }
                                                                     }
                                                                 }
