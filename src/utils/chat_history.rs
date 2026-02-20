@@ -429,6 +429,18 @@ impl ChatHistory {
         filename.strip_suffix(".json").unwrap_or(&filename).to_string()
     }
     
+    /// Returns true if the history has at least one user message or round (i.e. real content).
+    /// Used to avoid saving or listing empty "phantom" sessions.
+    pub fn has_content(history: &ChatHistory) -> bool {
+        match history {
+            ChatHistory::Standard(h) => !h.user_messages.is_empty(),
+            ChatHistory::PvP(h) => !h.rounds.is_empty(),
+            ChatHistory::Collaborative(h) => !h.rounds.is_empty(),
+            ChatHistory::Competitive(h) => !h.rounds.is_empty(),
+            ChatHistory::LLMChoice(h) => !h.rounds.is_empty(),
+        }
+    }
+
     /// Generate a chat summary from the first user message
     pub fn generate_chat_summary(history: &ChatHistory) -> String {
         let first_message = match history {

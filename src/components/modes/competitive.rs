@@ -218,7 +218,7 @@ fn compute_tallies(votes: &[ModelVote], model_ids: &[String]) -> (Vec<VoteTally>
 // ============================================================================
 
 #[component]
-pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<String>) -> Element {
+pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<String>, on_session_saved: EventHandler<ChatSession>) -> Element {
     // State
     let mut selected_models = use_signal(|| Vec::<String>::new());
     let mut selection_step = use_signal(|| 0usize); // 0 = select models, 1 = chat
@@ -370,6 +370,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             let mut current_phase_clone = current_phase.clone();
             let templates = prompt_templates();
             let session_id_for_save = session_id.clone();
+            let on_session_saved = on_session_saved.clone();
             let selected_models_for_save = selected_models.read().clone();
             let prompt_templates_for_save = prompt_templates.read().clone();
 
@@ -594,7 +595,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             conversation_history_clone.write().push(round);
             is_processing_clone.set(false);
             
-            // Auto-save if session_id is provided
+            // Auto-save only when there is content
             if let Some(sid) = session_id_for_save {
                 let history = CompetitiveHistory {
                     rounds: conversation_history_clone.read().iter()
@@ -637,25 +638,25 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                         voting: prompt_templates_for_save.voting.clone(),
                     },
                 };
-                
-                let summary = ChatHistory::generate_chat_summary(&ChatHistory::Competitive(history.clone()));
-                let session = ChatSession {
-                    id: sid.clone(),
-                    title: summary,
-                    mode: ChatMode::Competitive,
-                    timestamp: ChatHistory::format_timestamp(),
-                };
-                
-                let session_data = SessionData {
-                    session,
-                    history: ChatHistory::Competitive(history),
-                    created_at: ChatHistory::session_timestamp_from_id(&sid)
-                        .unwrap_or_else(ChatHistory::format_timestamp),
-                    updated_at: ChatHistory::format_timestamp(),
-                };
-                
-                if let Err(e) = ChatHistory::save_session(&session_data) {
-                    eprintln!("Failed to save session: {}", e);
+                let history_enum = ChatHistory::Competitive(history.clone());
+                if ChatHistory::has_content(&history_enum) {
+                    let summary = ChatHistory::generate_chat_summary(&history_enum);
+                    let session = ChatSession {
+                        id: sid.clone(),
+                        title: summary,
+                        mode: ChatMode::Competitive,
+                        timestamp: ChatHistory::format_timestamp(),
+                    };
+                    let session_data = SessionData {
+                        session: session.clone(),
+                        history: history_enum,
+                        created_at: ChatHistory::session_timestamp_from_id(&sid)
+                            .unwrap_or_else(ChatHistory::format_timestamp),
+                        updated_at: ChatHistory::format_timestamp(),
+                    };
+                    if ChatHistory::save_session(&session_data).is_ok() {
+                        on_session_saved.call(session);
+                    }
                 }
             }
             });

@@ -102,6 +102,7 @@ pub struct CollaborativeProps {
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
+    on_session_saved: EventHandler<ChatSession>,
 }
 
 impl PartialEq for CollaborativeProps {
@@ -271,6 +272,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
             let mut conversation_history_clone = conversation_history.clone();
             let templates = prompt_templates.read().clone();
             let session_id_for_save = props.session_id.clone();
+            let on_session_saved = props.on_session_saved.clone();
             let selected_models_for_save = selected_models.read().clone();
 
             // Initialize new round
@@ -586,13 +588,11 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                         current_phase_clone.set(CollaborativePhase::Complete);
                         is_processing_clone.set(false);
                         
-                        // Auto-save if session_id is provided
+                        // Auto-save only when there is content
                         if let Some(sid) = session_id_for_save {
                             let history_rounds: Vec<crate::utils::CollaborativeRound> = conversation_history_clone.read()
                                 .iter()
                                 .map(|r| {
-                                    // Convert internal format to history format
-                                    // Use phase1_responses as model_responses, consensus content as final_consensus
                                     let model_responses: Vec<crate::utils::ModelResponse> = r.phase1_responses.iter()
                                         .map(|mr| crate::utils::ModelResponse {
                                             model_id: mr.model_id.clone(),
@@ -608,31 +608,30 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                     }
                                 })
                                 .collect();
-                            
                             let history = crate::utils::CollaborativeHistory {
                                 rounds: history_rounds,
                                 selected_models: selected_models_for_save.clone(),
-                                system_prompt: String::new(), // Collaborative doesn't use a single system prompt
+                                system_prompt: String::new(),
                             };
-                            
-                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::Collaborative(history.clone()));
-                            let session = ChatSession {
-                                id: sid.clone(),
-                                title: summary,
-                                mode: ChatMode::Collaborative,
-                                timestamp: ChatHistory::format_timestamp(),
-                            };
-                            
-                            let session_data = SessionData {
-                                session,
-                                history: ChatHistory::Collaborative(history),
-                                created_at: ChatHistory::session_timestamp_from_id(&sid)
-                                    .unwrap_or_else(ChatHistory::format_timestamp),
-                                updated_at: ChatHistory::format_timestamp(),
-                            };
-                            
-                            if let Err(e) = ChatHistory::save_session(&session_data) {
-                                eprintln!("Failed to save collaborative session {}: {}", sid, e);
+                            let history_enum = ChatHistory::Collaborative(history.clone());
+                            if ChatHistory::has_content(&history_enum) {
+                                let summary = ChatHistory::generate_chat_summary(&history_enum);
+                                let session = ChatSession {
+                                    id: sid.clone(),
+                                    title: summary,
+                                    mode: ChatMode::Collaborative,
+                                    timestamp: ChatHistory::format_timestamp(),
+                                };
+                                let session_data = SessionData {
+                                    session: session.clone(),
+                                    history: history_enum,
+                                    created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                        .unwrap_or_else(ChatHistory::format_timestamp),
+                                    updated_at: ChatHistory::format_timestamp(),
+                                };
+                                if ChatHistory::save_session(&session_data).is_ok() {
+                                    on_session_saved.call(session);
+                                }
                             }
                         }
                     }
@@ -650,7 +649,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                         }
                         is_processing_clone.set(false);
                         
-                        // Auto-save even on error
+                        // Auto-save even on error (only when there is content)
                         if let Some(sid) = session_id_for_save {
                             let history_rounds: Vec<crate::utils::CollaborativeRound> = conversation_history_clone.read()
                                 .iter()
@@ -670,31 +669,30 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                     }
                                 })
                                 .collect();
-                            
                             let history = crate::utils::CollaborativeHistory {
                                 rounds: history_rounds,
                                 selected_models: selected_models_for_save.clone(),
                                 system_prompt: String::new(),
                             };
-                            
-                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::Collaborative(history.clone()));
-                            let session = ChatSession {
-                                id: sid.clone(),
-                                title: summary,
-                                mode: ChatMode::Collaborative,
-                                timestamp: ChatHistory::format_timestamp(),
-                            };
-                            
-                            let session_data = SessionData {
-                                session,
-                                history: ChatHistory::Collaborative(history),
-                                created_at: ChatHistory::session_timestamp_from_id(&sid)
-                                    .unwrap_or_else(ChatHistory::format_timestamp),
-                                updated_at: ChatHistory::format_timestamp(),
-                            };
-                            
-                            if let Err(e) = ChatHistory::save_session(&session_data) {
-                                eprintln!("Failed to save collaborative session {}: {}", sid, e);
+                            let history_enum = ChatHistory::Collaborative(history.clone());
+                            if ChatHistory::has_content(&history_enum) {
+                                let summary = ChatHistory::generate_chat_summary(&history_enum);
+                                let session = ChatSession {
+                                    id: sid.clone(),
+                                    title: summary,
+                                    mode: ChatMode::Collaborative,
+                                    timestamp: ChatHistory::format_timestamp(),
+                                };
+                                let session_data = SessionData {
+                                    session: session.clone(),
+                                    history: history_enum,
+                                    created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                        .unwrap_or_else(ChatHistory::format_timestamp),
+                                    updated_at: ChatHistory::format_timestamp(),
+                                };
+                                if ChatHistory::save_session(&session_data).is_ok() {
+                                    on_session_saved.call(session);
+                                }
                             }
                         }
                     }

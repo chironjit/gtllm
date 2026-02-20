@@ -140,7 +140,7 @@ fn App() -> Element {
         }
     };
 
-    // Handler for selecting a session
+    // Handler for selecting a session (no full list refresh — use in-memory list and verify file exists)
     let select_session = {
         let mut sessions_clone = sessions.clone();
         let mut current_session = current_session.clone();
@@ -148,7 +148,7 @@ fn App() -> Element {
         let mut messages = messages.clone();
         let mut arena_messages = arena_messages.clone();
         let mut is_loading = is_loading.clone();
-        
+
         move |session_id: String| {
             is_loading.set(true);
             let session_id = session_id.clone();
@@ -160,49 +160,30 @@ fn App() -> Element {
             let mut is_loading = is_loading.clone();
 
             spawn(async move {
-                // Small delay to ensure UI updates with loading state
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-                // Refresh sessions list first to ensure we have the latest data
-                // We run this in a blocking task to avoid blocking the UI thread
-                let sessions_result = tokio::task::spawn_blocking(|| ChatHistory::list_sessions()).await;
-                
-                match sessions_result {
-                    Ok(Ok(new_sessions)) => {
-                        sessions_clone.set(new_sessions);
-                    }
-                    Ok(Err(e)) => {
-                        eprintln!("Failed to refresh sessions: {}", e);
-                    }
-                    Err(e) => {
-                        eprintln!("Task join error: {}", e);
-                    }
-                }
-                
-                // Try to find the session in the refreshed list
                 let session_opt = sessions_clone.read().iter().find(|s| s.id == session_id).cloned();
-                
+
                 if let Some(session) = session_opt {
-                    // Check file existence
                     let session_path_exists = tokio::task::spawn_blocking(move || {
-                        ChatHistory::session_path(&session_id).is_ok()
+                        ChatHistory::session_path(&session_id).and_then(|p| {
+                            if p.exists() { Ok(()) } else { Err("not found".into()) }
+                        }).is_ok()
                     }).await.unwrap_or(false);
 
                     if session_path_exists {
                         current_session.set(Some(session.id.clone()));
                         current_view.set(AppView::ChatMode(session.mode));
-                        // Messages will be loaded by the mode component itself
                         messages.write().clear();
                         arena_messages.write().clear();
                     } else {
                         eprintln!("Session file not found: {}", session.id);
-                        // Remove invalid session from list
                         sessions_clone.write().retain(|s| s.id != session.id);
                     }
                 } else {
                     eprintln!("Session not found in list");
                 }
-                
+
                 is_loading.set(false);
             });
         }
@@ -255,22 +236,24 @@ fn App() -> Element {
         }
     };
 
-    // Handler for mode selection from NewChat view
+    // Handler for mode selection from NewChat view.
+    // Do not add to sessions here — session is added only on first save (when there is content).
     let select_mode = move |mode: ChatMode| {
         let timestamp = ChatHistory::format_timestamp();
         let title = format!("{} Chat", mode.name());
         let session_id = ChatHistory::generate_session_id(mode, &timestamp, &title);
-        let new_session = ChatSession {
-            id: session_id.clone(),
-            title,
-            mode,
-            timestamp,
-        };
-        sessions.write().push(new_session.clone());
         current_session.set(Some(session_id));
         current_view.set(AppView::ChatMode(mode));
         messages.write().clear();
         arena_messages.write().clear();
+    };
+
+    // Called by mode components when they save a session for the first time (with content).
+    // Ensures the session appears in the sidebar only after real activity.
+    let on_session_saved = move |session: ChatSession| {
+        if !sessions.read().iter().any(|s| s.id == session.id) {
+            sessions.write().push(session);
+        }
     };
 
     // Handler for opening settings
@@ -495,6 +478,7 @@ fn App() -> Element {
                                             client: openrouter_client.read().clone(),
                                             input_settings,
                                             session_id,
+                                            on_session_saved,
                                         }
                                     },
                                     ChatMode::PvP => rsx! {
@@ -503,6 +487,7 @@ fn App() -> Element {
                                             client: openrouter_client.read().clone(),
                                             input_settings,
                                             session_id,
+                                            on_session_saved,
                                         }
                                     },
                                     ChatMode::Collaborative => rsx! {
@@ -511,6 +496,7 @@ fn App() -> Element {
                                             client: openrouter_client.read().clone(),
                                             input_settings,
                                             session_id,
+                                            on_session_saved,
                                         }
                                     },
                                     ChatMode::Competitive => rsx! {
@@ -519,6 +505,7 @@ fn App() -> Element {
                                             client: openrouter_client.read().clone(),
                                             input_settings,
                                             session_id,
+                                            on_session_saved,
                                         }
                                     },
                                     ChatMode::LLMChoice => rsx! {
@@ -527,6 +514,7 @@ fn App() -> Element {
                                             client: openrouter_client.read().clone(),
                                             input_settings,
                                             session_id,
+                                            on_session_saved,
                                         }
                                     },
                                 }

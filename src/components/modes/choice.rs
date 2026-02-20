@@ -271,6 +271,7 @@ pub struct ChoiceProps {
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
+    on_session_saved: EventHandler<ChatSession>,
 }
 
 impl PartialEq for ChoiceProps {
@@ -415,6 +416,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let session_id_for_save = props.session_id.clone();
+            let on_session_saved = props.on_session_saved.clone();
             let selected_models_for_save = selected_models.read().clone();
 
             // Initialize new round
@@ -590,7 +592,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                         }
                         is_processing_clone.set(false);
                         
-                        // Auto-save if session_id is provided
+                        // Auto-save only when there is content
                         if let Some(sid) = session_id_for_save {
                             let history_rounds: Vec<crate::utils::LLMChoiceRound> = conversation_history_clone.read()
                                 .iter()
@@ -600,7 +602,6 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                         Some(Strategy::Compete) => "compete".to_string(),
                                         None => "undecided".to_string(),
                                     };
-                                    // Get content from collaborative or competitive result
                                     let content = r.collaborative_result.as_ref()
                                         .and_then(|cr| cr.phase3_consensus.as_ref().map(|c| c.content.clone()))
                                         .or_else(|| {
@@ -614,30 +615,29 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     }
                                 })
                                 .collect();
-                            
                             let history = crate::utils::LLMChoiceHistory {
                                 rounds: history_rounds,
                                 selected_models: selected_models_for_save.clone(),
                             };
-                            
-                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::LLMChoice(history.clone()));
-                            let session = ChatSession {
-                                id: sid.clone(),
-                                title: summary,
-                                mode: ChatMode::LLMChoice,
-                                timestamp: ChatHistory::format_timestamp(),
-                            };
-                            
-                            let session_data = SessionData {
-                                session,
-                                history: ChatHistory::LLMChoice(history),
-                                created_at: ChatHistory::session_timestamp_from_id(&sid)
-                                    .unwrap_or_else(ChatHistory::format_timestamp),
-                                updated_at: ChatHistory::format_timestamp(),
-                            };
-                            
-                            if let Err(e) = ChatHistory::save_session(&session_data) {
-                                eprintln!("Failed to save LLMChoice session {}: {}", sid, e);
+                            let history_enum = ChatHistory::LLMChoice(history.clone());
+                            if ChatHistory::has_content(&history_enum) {
+                                let summary = ChatHistory::generate_chat_summary(&history_enum);
+                                let session = ChatSession {
+                                    id: sid.clone(),
+                                    title: summary,
+                                    mode: ChatMode::LLMChoice,
+                                    timestamp: ChatHistory::format_timestamp(),
+                                };
+                                let session_data = SessionData {
+                                    session: session.clone(),
+                                    history: history_enum,
+                                    created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                        .unwrap_or_else(ChatHistory::format_timestamp),
+                                    updated_at: ChatHistory::format_timestamp(),
+                                };
+                                if ChatHistory::save_session(&session_data).is_ok() {
+                                    on_session_saved.call(session);
+                                }
                             }
                         }
                     }
@@ -656,7 +656,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                         }
                         is_processing_clone.set(false);
                         
-                        // Auto-save even on error
+                        // Auto-save even on error (only when there is content)
                         if let Some(sid) = session_id_for_save {
                             let history_rounds: Vec<crate::utils::LLMChoiceRound> = conversation_history_clone.read()
                                 .iter()
@@ -679,30 +679,29 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     }
                                 })
                                 .collect();
-                            
                             let history = crate::utils::LLMChoiceHistory {
                                 rounds: history_rounds,
                                 selected_models: selected_models_for_save.clone(),
                             };
-                            
-                            let summary = ChatHistory::generate_chat_summary(&ChatHistory::LLMChoice(history.clone()));
-                            let session = ChatSession {
-                                id: sid.clone(),
-                                title: summary,
-                                mode: ChatMode::LLMChoice,
-                                timestamp: ChatHistory::format_timestamp(),
-                            };
-                            
-                            let session_data = SessionData {
-                                session,
-                                history: ChatHistory::LLMChoice(history),
-                                created_at: ChatHistory::session_timestamp_from_id(&sid)
-                                    .unwrap_or_else(ChatHistory::format_timestamp),
-                                updated_at: ChatHistory::format_timestamp(),
-                            };
-                            
-                            if let Err(e) = ChatHistory::save_session(&session_data) {
-                                eprintln!("Failed to save LLMChoice session {}: {}", sid, e);
+                            let history_enum = ChatHistory::LLMChoice(history.clone());
+                            if ChatHistory::has_content(&history_enum) {
+                                let summary = ChatHistory::generate_chat_summary(&history_enum);
+                                let session = ChatSession {
+                                    id: sid.clone(),
+                                    title: summary,
+                                    mode: ChatMode::LLMChoice,
+                                    timestamp: ChatHistory::format_timestamp(),
+                                };
+                                let session_data = SessionData {
+                                    session: session.clone(),
+                                    history: history_enum,
+                                    created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                        .unwrap_or_else(ChatHistory::format_timestamp),
+                                    updated_at: ChatHistory::format_timestamp(),
+                                };
+                                if ChatHistory::save_session(&session_data).is_ok() {
+                                    on_session_saved.call(session);
+                                }
                             }
                         }
                     }

@@ -53,6 +53,7 @@ pub struct PvPProps {
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
+    on_session_saved: EventHandler<ChatSession>,
 }
 
 impl PartialEq for PvPProps {
@@ -264,6 +265,7 @@ pub fn PvP(props: PvPProps) -> Element {
             let mut current_moderator_response_clone = current_moderator_response.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let session_id_for_save = props.session_id.clone();
+            let on_session_saved = props.on_session_saved.clone();
             let bot_models_for_save = bot_models.read().clone();
             let moderator_model_for_save = moderator_model.read().clone();
             let system_prompts_for_save = system_prompts.read().clone();
@@ -430,7 +432,7 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                 current_moderator_response_clone.set(String::new());
                                                                 is_streaming_moderator_clone.set(false);
                                                                 
-                                                                // Auto-save if session_id is provided
+                                                                // Auto-save only when there is content
                                                                 if let Some(sid) = session_id_for_save {
                                                                     let history = PvPHistory {
                                                                         rounds: conversation_history_clone.read().iter()
@@ -459,25 +461,25 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                             moderator: system_prompts_for_save.moderator.clone(),
                                                                         },
                                                                     };
-                                                                    
-                                                                    let summary = ChatHistory::generate_chat_summary(&ChatHistory::PvP(history.clone()));
-                                                                    let session = ChatSession {
-                                                                        id: sid.clone(),
-                                                                        title: summary,
-                                                                        mode: ChatMode::PvP,
-                                                                        timestamp: ChatHistory::format_timestamp(),
-                                                                    };
-                                                                    
-                                                                    let session_data = SessionData {
-                                                                        session,
-                                                                        history: ChatHistory::PvP(history),
-                                                                        created_at: ChatHistory::session_timestamp_from_id(&sid)
-                                                                            .unwrap_or_else(ChatHistory::format_timestamp),
-                                                                        updated_at: ChatHistory::format_timestamp(),
-                                                                    };
-                                                                    
-                                                                    if let Err(e) = ChatHistory::save_session(&session_data) {
-                                                                        eprintln!("Failed to save session: {}", e);
+                                                                    let history_enum = ChatHistory::PvP(history.clone());
+                                                                    if ChatHistory::has_content(&history_enum) {
+                                                                        let summary = ChatHistory::generate_chat_summary(&history_enum);
+                                                                        let session = ChatSession {
+                                                                            id: sid.clone(),
+                                                                            title: summary,
+                                                                            mode: ChatMode::PvP,
+                                                                            timestamp: ChatHistory::format_timestamp(),
+                                                                        };
+                                                                        let session_data = SessionData {
+                                                                            session: session.clone(),
+                                                                            history: history_enum,
+                                                                            created_at: ChatHistory::session_timestamp_from_id(&sid)
+                                                                                .unwrap_or_else(ChatHistory::format_timestamp),
+                                                                            updated_at: ChatHistory::format_timestamp(),
+                                                                        };
+                                                                        if ChatHistory::save_session(&session_data).is_ok() {
+                                                                            on_session_saved.call(session);
+                                                                        }
                                                                     }
                                                                 }
                                                                 

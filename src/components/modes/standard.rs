@@ -59,6 +59,7 @@ pub struct StandardProps {
     client: Option<Arc<OpenRouterClient>>,
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
+    on_session_saved: EventHandler<ChatSession>,
 }
 
 impl PartialEq for StandardProps {
@@ -66,7 +67,7 @@ impl PartialEq for StandardProps {
         self.theme == other.theme 
             && self.input_settings == other.input_settings
             && self.session_id == other.session_id
-        // Skip client comparison
+        // Skip client and callback comparison
     }
 }
 
@@ -233,6 +234,10 @@ pub fn Standard(props: StandardProps) -> Element {
             let mut model_responses_clone = model_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let session_id_for_save = props.session_id.clone();
+            let on_session_saved = props.on_session_saved.clone();
+            let user_messages_save = user_messages.clone();
+            let selected_models_save = selected_models.clone();
+            let system_prompt_save = system_prompt.clone();
 
             spawn(async move {
                 is_streaming_clone.set(true);
@@ -492,11 +497,10 @@ pub fn Standard(props: StandardProps) -> Element {
                 current_streaming_responses_clone.write().clear();
                 is_streaming_clone.set(false);
                 
-                // Auto-save if session_id is provided
+                // Auto-save when there is content (use cloned signals so we see current state)
                 if let Some(sid) = session_id_for_save {
-                    // Reconstruct history for saving
                     let history = StandardHistory {
-                        user_messages: user_messages.read().clone(),
+                        user_messages: user_messages_save.read().clone(),
                         model_responses: model_responses_clone.read().iter()
                             .map(|responses| {
                                 responses.iter()
@@ -504,39 +508,39 @@ pub fn Standard(props: StandardProps) -> Element {
                                         model_id: r.model_id.clone(),
                                         content: r.content.clone(),
                                         error_message: r.error_message.clone(),
-                                        // Note: utils::ModelResponse doesn't have metrics field
                                     })
                                     .collect()
                             })
                             .collect(),
-                        selected_models: selected_models.read().clone(),
-                        system_prompt: system_prompt.read().clone(),
+                        selected_models: selected_models_save.read().clone(),
+                        system_prompt: system_prompt_save.read().clone(),
                         conversation_history: crate::utils::ConversationHistory {
                             single_model: conversation_history_clone.read().single_model.clone(),
                             multi_model: conversation_history_clone.read().multi_model.clone(),
                         },
                     };
-                    
-                    let summary = ChatHistory::generate_chat_summary(&ChatHistory::Standard(history.clone()));
+                    let history_enum = ChatHistory::Standard(history.clone());
+                    if !ChatHistory::has_content(&history_enum) {
+                        return;
+                    }
+                    let summary = ChatHistory::generate_chat_summary(&history_enum);
                     let session = ChatSession {
                         id: sid.clone(),
                         title: summary,
                         mode: ChatMode::Standard,
                         timestamp: ChatHistory::format_timestamp(),
                     };
-                    
                     let session_data = SessionData {
-                        session,
-                        history: ChatHistory::Standard(history),
+                        session: session.clone(),
+                        history: history_enum,
                         created_at: ChatHistory::session_timestamp_from_id(&sid)
                             .unwrap_or_else(ChatHistory::format_timestamp),
                         updated_at: ChatHistory::format_timestamp(),
                     };
-                    
                     match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
                         Err(e) => eprintln!("Failed to save session task: {}", e),
                         Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                        Ok(Ok(_)) => {}
+                        Ok(Ok(_)) => on_session_saved.call(session),
                     }
                 }
             });
