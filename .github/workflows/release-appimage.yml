@@ -1,23 +1,44 @@
-# Build AppImage and attach to GitHub Release when the release doesn't already
-# have an AppImage for the version in Cargo.toml.
+# Build AppImage and create/update GitHub Release. Runs when you push a version tag (e.g. v0.1.0).
+# Skips build only if that release already has an AppImage for the version in Cargo.toml.
 name: Release AppImage
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    # Optional: run manually from Actions tab (uses default branch unless you pass a ref)
 
 jobs:
   build-appimage:
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       skip: ${{ steps.check.outputs.skip }}
+      tag: ${{ steps.tag.outputs.tag }}
+      ref: ${{ steps.tag.outputs.ref }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Resolve tag and ref for this run
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V=$(grep -oP '^version\s*=\s*"\K[^"]+' Cargo.toml)
+            echo "tag=v${V}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "ref=${GITHUB_REF}" >> $GITHUB_OUTPUT
+          fi
+          echo "Tag: $(grep '^tag=' $GITHUB_OUTPUT | cut -d= -f2-)"
+          echo "Ref: $(grep '^ref=' $GITHUB_OUTPUT | cut -d= -f2-)"
 
       - name: Get version from Cargo.toml
         id: version
@@ -31,10 +52,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ steps.tag.outputs.tag }}"
           VERSION="${{ steps.version.outputs.version }}"
+          # If release doesn't exist yet, do not skip (we'll create it)
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" &>/dev/null; then
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "No release $TAG yet, will build and create release."
+            exit 0
+          fi
           ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null || true)
-          # Skip if any asset looks like our AppImage for this version (e.g. gtllm-0.1.0-x86_64.AppImage)
           if echo "$ASSETS" | grep -qE "gtllm[-_]?${VERSION}.*\.AppImage|.*${VERSION}.*x86_64\.AppImage"; then
             echo "skip=true" >> $GITHUB_OUTPUT
             echo "Release $TAG already has an AppImage for version $VERSION, skipping build."
@@ -46,20 +72,20 @@ jobs:
             exit 0
           fi
           echo "skip=false" >> $GITHUB_OUTPUT
-          echo "No AppImage for version $VERSION found on release $TAG, will build."
+          echo "No AppImage for version $VERSION on release $TAG, will build."
 
   appimage:
     needs: build-appimage
     if: needs.build-appimage.outputs.skip != 'true'
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-22.04
     permissions:
-      contents: write  # upload release assets
+      contents: write  # create release and upload assets
 
     steps:
-      - name: Checkout repository (at release tag)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ needs.build-appimage.outputs.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -120,11 +146,25 @@ jobs:
           echo "name=$NEW_NAME" >> $GITHUB_OUTPUT
           echo "Uploading: $NEW_NAME"
 
-      - name: Upload AppImage to Release
+      - name: Ensure tag exists (for manual run from branch)
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ needs.build-appimage.outputs.tag }}"
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Create release (if missing) and upload AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.build-appimage.outputs.tag }}"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes || true
           gh release upload "$TAG" "${{ steps.artifact.outputs.path }}" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
