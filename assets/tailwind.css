@@ -375,6 +375,9 @@
   .grid {
     display: grid;
   }
+  .hidden {
+    display: none;
+  }
   .inline {
     display: inline;
   }
@@ -414,11 +417,17 @@
   .h-screen {
     height: 100vh;
   }
+  .max-h-\[13rem\] {
+    max-height: 13rem;
+  }
   .max-h-\[90vh\] {
     max-height: 90vh;
   }
   .min-h-0 {
     min-height: calc(var(--spacing) * 0);
+  }
+  .min-h-\[3\.5rem\] {
+    min-height: 3.5rem;
   }
   .min-h-\[3rem\] {
     min-height: 3rem;
@@ -650,6 +659,9 @@
   }
   .overflow-y-auto {
     overflow-y: auto;
+  }
+  .overflow-y-hidden {
+    overflow-y: hidden;
   }
   .rounded {
     border-radius: 0.25rem;

@@ -1,5 +1,28 @@
 use crate::utils::{InputSettings, Theme};
 use dioxus::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+const CHAT_INPUT_MIN_HEIGHT_PX: u32 = 56;
+const CHAT_INPUT_MAX_HEIGHT_PX: u32 = 208;
+static NEXT_CHAT_INPUT_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn resize_chat_input(textarea_id: &str) {
+    let _ = document::eval(&format!(
+        r#"
+            const textarea = document.getElementById({textarea_id:?});
+            if (!textarea) {{
+                return;
+            }}
+
+            const minHeight = {CHAT_INPUT_MIN_HEIGHT_PX};
+            const maxHeight = {CHAT_INPUT_MAX_HEIGHT_PX};
+            textarea.style.height = "auto";
+            const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+            textarea.style.height = `${{nextHeight}}px`;
+            textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+        "#
+    ));
+}
 
 #[component]
 pub fn ChatInput(
@@ -10,6 +33,16 @@ pub fn ChatInput(
 ) -> Element {
     let mut input_text = use_signal(|| String::new());
     let _ = theme.read();
+    let textarea_id =
+        use_hook(|| format!("chat-input-{}", NEXT_CHAT_INPUT_ID.fetch_add(1, Ordering::Relaxed)));
+
+    {
+        let textarea_id = textarea_id.clone();
+        use_effect(move || {
+            let _ = input_text();
+            resize_chat_input(&textarea_id);
+        });
+    }
 
     let handle_keydown = move |evt: KeyboardEvent| {
         if is_streaming {
@@ -65,10 +98,12 @@ pub fn ChatInput(
                     class: "relative",
 
                     textarea {
+                        id: "{textarea_id}",
                         value: "{input_text}",
                         oninput: move |evt| input_text.set(evt.value().clone()),
                         onkeydown: handle_keydown,
                         disabled: is_streaming,
+                        rows: "2",
                         placeholder: if is_streaming {
                             "Waiting for response..."
                         } else if input_settings.read().ctrl_enter_submit {
@@ -77,9 +112,9 @@ pub fn ChatInput(
                             "Type your message... (Enter to send)"
                         },
                         class: if is_streaming {
-                            "w-full px-4 pr-16 py-3 rounded-xl bg-[var(--color-base-100)]/50 text-[var(--color-base-content)]/50 border-[var(--color-base-300)] border-2 resize-none h-16 sm:h-20 font-family-sans opacity-60 cursor-not-allowed"
+                            "w-full px-4 pr-16 py-3 rounded-xl bg-[var(--color-base-100)]/50 text-[var(--color-base-content)]/50 border-[var(--color-base-300)] border-2 resize-none min-h-[3.5rem] max-h-[13rem] overflow-y-hidden font-family-sans opacity-60 cursor-not-allowed"
                         } else {
-                            "w-full px-4 pr-16 py-3 rounded-xl bg-[var(--color-base-100)] text-[var(--color-base-content)] border-[var(--color-base-300)] border-2 focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent transition-all duration-200 text-sm sm:text-base shadow-sm resize-none h-16 sm:h-20 font-family-sans"
+                            "w-full px-4 pr-16 py-3 rounded-xl bg-[var(--color-base-100)] text-[var(--color-base-content)] border-[var(--color-base-300)] border-2 focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)] focus:border-transparent transition-all duration-200 text-sm sm:text-base shadow-sm resize-none min-h-[3.5rem] max-h-[13rem] overflow-y-hidden font-family-sans"
                         },
                         autofocus: true,
                     }
