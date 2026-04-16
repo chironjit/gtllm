@@ -20,6 +20,6 @@ pub use phase_indicator::PhaseIndicator;
 pub use prompt_card::PromptCard;
 pub use prompt_editor::{PromptEditorModal, PromptType};
 pub use selection::LLMSelection;
-pub use streaming_indicator::StreamingIndicator;
+pub use streaming_indicator::{StreamingIndicator, ThinkingIndicator};
 pub use vote_display::VoteDisplay;
 pub use vote_tally::{VoteTally, VoteTallyProps};

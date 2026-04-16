@@ -62,6 +62,18 @@ pub fn remove_run(mut active_runs: Signal<HashMap<String, ActiveRunRecord>>, run
     active_runs.write().remove(run_id);
 }
 
+pub fn upsert_session(
+    mut sessions: Signal<Vec<crate::utils::ChatSession>>,
+    session: crate::utils::ChatSession,
+) {
+    let mut sessions_write = sessions.write();
+    if let Some(existing) = sessions_write.iter_mut().find(|existing| existing.id == session.id) {
+        *existing = session;
+    } else {
+        sessions_write.push(session);
+    }
+}
+
 pub fn find_run_for_session(
     active_runs: Signal<HashMap<String, ActiveRunRecord>>,
     session_id: &Option<String>,

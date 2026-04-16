@@ -1,10 +1,10 @@
-use super::common::{ChatInput, FormattedText, Modal};
+use super::common::{ChatInput, FormattedText, Modal, ThinkingIndicator};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel, recv_multi_event_with_cancel,
     register_active_run, remove_run, set_run_status, try_signal_read, try_signal_set,
-    try_signal_update, ActiveRunRecord, ChatMessage, ChatHistory, ChatMode, ChatSession,
-    InputSettings, Model, OpenRouterClient, PvPHistory, RunStatus, SessionData, StreamEvent,
-    Theme,
+    try_signal_update, upsert_session, ActiveRunRecord, ChatMessage, ChatHistory, ChatMode,
+    ChatSession, InputSettings, Model, OpenRouterClient, PvPHistory, RunStatus, SessionData,
+    StreamEvent, Theme,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -63,6 +63,7 @@ pub struct PvPProps {
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
     on_session_saved: EventHandler<ChatSession>,
+    on_save_error: EventHandler<String>,
 }
 
 impl PartialEq for PvPProps {
@@ -81,6 +82,7 @@ pub fn PvP(props: PvPProps) -> Element {
     let input_settings = props.input_settings;
     let _ = theme.read();
     let active_runs = use_context::<Signal<HashMap<String, ActiveRunRecord>>>();
+    let sessions = use_context::<Signal<Vec<ChatSession>>>();
 
     // Model selection state
     let mut bot_models = use_signal(|| Vec::<String>::new());
@@ -279,6 +281,21 @@ pub fn PvP(props: PvPProps) -> Element {
         current_run_id.set(None);
     }
 
+    // Cancel active run when component unmounts
+    {
+        let mut active_runs = active_runs.clone();
+        let current_run_id = current_run_id.clone();
+        use_drop(move || {
+            if let Some(run_id) = current_run_id.try_read().ok().and_then(|id| id.clone()) {
+                if let Some(run) = active_runs.try_read().ok().and_then(|runs| runs.get(&run_id).cloned()) {
+                    run.request_cancel();
+                    run.task.cancel();
+                }
+                remove_run(active_runs, &run_id);
+            }
+        });
+    }
+
     // Send message handler
     let send_message = move |text: String| {
         if text.trim().is_empty() || *is_streaming_bots.read() || *is_streaming_moderator.read() || run_is_active {
@@ -306,10 +323,11 @@ pub fn PvP(props: PvPProps) -> Element {
             let mut current_moderator_response_clone = current_moderator_response.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let session_id_for_save = props.session_id.clone();
-            let on_session_saved = props.on_session_saved.clone();
+            let mut sessions_for_task = sessions.clone();
             let bot_models_for_save = bot_models.read().clone();
             let moderator_model_for_save = moderator_model.read().clone();
             let system_prompts_for_save = system_prompts.read().clone();
+            let on_save_error_for_task = props.on_save_error.clone();
             let cancel_flag = Arc::new(AtomicBool::new(false));
             let run_id = create_run_id(ChatMode::PvP, &props.session_id);
             current_run_id.set(Some(run_id.clone()));
@@ -548,9 +566,9 @@ pub fn PvP(props: PvPProps) -> Element {
                                                                             updated_at: ChatHistory::format_timestamp(),
                                                                         };
                                                                         match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                                                                            Err(e) => eprintln!("Failed to save session task: {}", e),
-                                                                            Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                                                                            Ok(Ok(_)) => on_session_saved.call(session),
+                                                                            Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                                                            Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                                                            Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                                                                         }
                                                                     }
                                                                 }
@@ -1171,9 +1189,13 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 }
                                                 div {
                                                     class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem]",
-                                                    div {
-                                                        class: "whitespace-pre-wrap break-words",
-                                                        "{current_bot_responses.read().get(&bot_models.read()[0]).cloned().unwrap_or_default()}"
+                                                    if current_bot_responses.read().get(&bot_models.read()[0]).map(|s| !s.is_empty()).unwrap_or(false) {
+                                                        div {
+                                                            class: "whitespace-pre-wrap break-words",
+                                                            "{current_bot_responses.read().get(&bot_models.read()[0]).cloned().unwrap_or_default()}"
+                                                        }
+                                                    } else {
+                                                        ThinkingIndicator {}
                                                     }
                                                 }
                                             }
@@ -1190,9 +1212,13 @@ pub fn PvP(props: PvPProps) -> Element {
                                                 }
                                                 div {
                                                     class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem]",
-                                                    div {
-                                                        class: "whitespace-pre-wrap break-words",
-                                                        "{current_bot_responses.read().get(&bot_models.read()[1]).cloned().unwrap_or_default()}"
+                                                    if current_bot_responses.read().get(&bot_models.read()[1]).map(|s| !s.is_empty()).unwrap_or(false) {
+                                                        div {
+                                                            class: "whitespace-pre-wrap break-words",
+                                                            "{current_bot_responses.read().get(&bot_models.read()[1]).cloned().unwrap_or_default()}"
+                                                        }
+                                                    } else {
+                                                        ThinkingIndicator {}
                                                     }
                                                 }
                                             }
@@ -1211,10 +1237,14 @@ pub fn PvP(props: PvPProps) -> Element {
                                             }
                                             div {
                                                 class: "text-sm sm:text-base text-[var(--color-base-content)] min-h-[3rem]",
-                                                div {
-                                                    class: "whitespace-pre-wrap break-words",
-                                                    "{current_moderator_response()}"
-                                                }
+                                                if current_moderator_response().is_empty() {
+                                                        ThinkingIndicator {}
+                                                    } else {
+                                                        div {
+                                                            class: "whitespace-pre-wrap break-words",
+                                                            "{current_moderator_response()}"
+                                                        }
+                                                    }
                                             }
                                         }
                                     }
@@ -1258,6 +1288,7 @@ pub fn PvP(props: PvPProps) -> Element {
                     theme,
                     input_settings,
                     on_send: send_message,
+                    is_streaming: *is_streaming_bots.read() || *is_streaming_moderator.read(),
                 }
             }
             

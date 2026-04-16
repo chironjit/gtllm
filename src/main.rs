@@ -7,9 +7,15 @@ mod components;
 mod utils;
 
 use components::{
-    Choice, Collaborative, Competitive, Header, NewChat, PvP, Settings as SettingsView, Sidebar, Standard,
+    Choice, Collaborative, Competitive, ConfirmDialog, Header, NewChat, PvP, Settings as SettingsView, Sidebar,
+    Standard, ToastContainer, ToastType, add_toast,
 };
-use utils::{ActiveRunRecord, AppView, ArenaMessage, ChatHistory, ChatMode, ChatSession, InputSettings, Message, OpenRouterClient, RunStatus, Settings, Theme};
+use utils::{
+    ActiveRunRecord, AppView, ArenaMessage, ChatHistory, ChatMode, ChatSession, InputSettings, Message,
+    OpenRouterClient, RunStatus, Settings, SessionData, Theme,
+    StandardHistory, PvPHistory, CollaborativeHistory, CompetitiveHistory, LLMChoiceHistory,
+    ConversationHistory, SystemPrompts, PromptTemplates,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -33,6 +39,48 @@ fn main() {
 
     #[cfg(not(feature = "desktop"))]
     dioxus::launch(App);
+}
+
+/// Create an empty ChatHistory for a given mode, suitable for a draft session.
+fn empty_history_for_mode(mode: ChatMode) -> ChatHistory {
+    match mode {
+        ChatMode::Standard => ChatHistory::Standard(StandardHistory {
+            user_messages: Vec::new(),
+            model_responses: Vec::new(),
+            selected_models: Vec::new(),
+            system_prompt: String::new(),
+            conversation_history: ConversationHistory {
+                single_model: Vec::new(),
+                multi_model: HashMap::new(),
+            },
+        }),
+        ChatMode::PvP => ChatHistory::PvP(PvPHistory {
+            rounds: Vec::new(),
+            bot_models: Vec::new(),
+            moderator_model: None,
+            system_prompts: SystemPrompts {
+                bot: String::new(),
+                moderator: String::new(),
+            },
+        }),
+        ChatMode::Collaborative => ChatHistory::Collaborative(CollaborativeHistory {
+            rounds: Vec::new(),
+            selected_models: Vec::new(),
+            system_prompt: String::new(),
+        }),
+        ChatMode::Competitive => ChatHistory::Competitive(CompetitiveHistory {
+            rounds: Vec::new(),
+            selected_models: Vec::new(),
+            prompt_templates: PromptTemplates {
+                proposal: String::new(),
+                voting: String::new(),
+            },
+        }),
+        ChatMode::LLMChoice => ChatHistory::LLMChoice(LLMChoiceHistory {
+            rounds: Vec::new(),
+            selected_models: Vec::new(),
+        }),
+    }
 }
 
 #[component]
@@ -140,7 +188,6 @@ fn App() -> Element {
     // Theme state - load from settings
     let mut theme = use_signal(|| {
         let settings = app_settings.read();
-        // Parse theme from settings, default to Dracula if parsing fails
         Theme::from_str(&settings.theme).unwrap_or(Theme::Dracula)
     });
 
@@ -156,7 +203,7 @@ fn App() -> Element {
     // Messages for arena modes
     let mut arena_messages = use_signal(|| Vec::<ArenaMessage>::new());
 
-    // Chat sessions - load from disk on startup (fast, no file I/O)
+    // Chat sessions - load from disk on startup
     let mut sessions = use_signal(|| {
         ChatHistory::list_sessions()
             .unwrap_or_else(|e| {
@@ -164,6 +211,7 @@ fn App() -> Element {
                 Vec::new()
             })
     });
+    use_context_provider(|| sessions);
     let mut current_session = use_signal(|| None::<String>);
 
     // Input settings
@@ -177,19 +225,32 @@ fn App() -> Element {
     // Message counter for IDs
     let mut message_counter = use_signal(|| 0);
 
+    // Toast notifications
+    let mut toasts = use_signal(Vec::<components::ToastMessage>::new);
+
+    // Confirmation dialog state (for navigating away during active streaming)
+    let mut confirm_dialog_open = use_signal(|| false);
+    let mut pending_navigation = use_signal(|| None::<String>); // "new_chat" or a session_id
+
+    // Check if there are active runs for the current session
+    let has_active_runs = {
+        let sid = current_session.read().clone();
+        active_runs.read().values().any(|run| {
+            run.session_id == sid
+                && matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
+        })
+    };
+
     // Handler for toggling dark/light mode
     let toggle_mode = move |_| {
         let current_theme = *theme.read();
         let new_theme = if current_theme.is_dark() {
-            // Switch to first light theme
             Theme::Winter
         } else {
-            // Switch to first dark theme
             Theme::Dracula
         };
         theme.set(new_theme);
 
-        // Save theme to settings
         let mut settings = app_settings.write();
         settings.theme = new_theme.to_string_id().to_string();
         settings.theme_mode = if new_theme.is_dark() {
@@ -206,7 +267,6 @@ fn App() -> Element {
     let change_theme = move |new_theme: Theme| {
         theme.set(new_theme);
 
-        // Save theme to settings
         let mut settings = app_settings.write();
         settings.theme = new_theme.to_string_id().to_string();
         settings.theme_mode = if new_theme.is_dark() {
@@ -228,7 +288,6 @@ fn App() -> Element {
             return;
         }
 
-        // Recreate OpenRouter client with new API key
         match OpenRouterClient::new(api_key) {
             Ok(client) => openrouter_client.set(Some(Arc::new(client))),
             Err(e) => {
@@ -238,119 +297,275 @@ fn App() -> Element {
         }
     };
 
-    // Handler for selecting a session (no full list refresh — use in-memory list and verify file exists)
-    let select_session = {
-        let mut sessions_clone = sessions.clone();
-        let mut current_session = current_session.clone();
+    // Helper: cancel all active runs for the current session
+    let mut cancel_current_runs = {
+        let mut active_runs = active_runs.clone();
+        move || {
+            let sid = current_session.read().clone();
+            let run_ids: Vec<String> = active_runs
+                .read()
+                .iter()
+                .filter(|(_, run)| {
+                    run.session_id == sid
+                        && matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for run_id in &run_ids {
+                if let Some(run) = active_runs.write().get_mut(run_id) {
+                    run.request_cancel();
+                    run.task.cancel();
+                }
+                active_runs.write().remove(run_id);
+            }
+        }
+    };
+
+    // Execute a pending navigation (after confirmation or if no active runs)
+    let mut execute_navigation = {
         let mut current_view = current_view.clone();
         let mut messages = messages.clone();
         let mut arena_messages = arena_messages.clone();
+        let mut current_session = current_session.clone();
+        let mut sessions = sessions.clone();
         let mut is_loading = is_loading.clone();
 
-        move |session_id: String| {
+        move |target: String| {
             is_loading.set(true);
-            let session_id = session_id.clone();
-            let mut sessions_clone = sessions_clone.clone();
-            let mut current_session = current_session.clone();
             let mut current_view = current_view.clone();
             let mut messages = messages.clone();
             let mut arena_messages = arena_messages.clone();
+            let mut current_session = current_session.clone();
+            let mut sessions = sessions.clone();
             let mut is_loading = is_loading.clone();
 
             spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-                let session_opt = sessions_clone.read().iter().find(|s| s.id == session_id).cloned();
-
-                if let Some(session) = session_opt {
-                    let session_path_exists = tokio::task::spawn_blocking(move || {
-                        ChatHistory::session_path(&session_id).and_then(|p| {
-                            if p.exists() { Ok(()) } else { Err("not found".into()) }
-                        }).is_ok()
-                    }).await.unwrap_or(false);
-
-                    if session_path_exists {
-                        current_session.set(Some(session.id.clone()));
-                        current_view.set(AppView::ChatMode(session.mode));
-                        messages.write().clear();
-                        arena_messages.write().clear();
-                    } else {
-                        eprintln!("Session file not found: {}", session.id);
-                        sessions_clone.write().retain(|s| s.id != session.id);
-                    }
+                if target == "new_chat" {
+                    current_view.set(AppView::NewChat);
+                    messages.write().clear();
+                    arena_messages.write().clear();
+                    current_session.set(None);
                 } else {
-                    eprintln!("Session not found in list");
+                    let session_id = target;
+                    let session_opt = sessions.read().iter().find(|s| s.id == session_id).cloned();
+
+                    if let Some(session) = session_opt {
+                        let sid = session_id.clone();
+                        let session_path_exists = tokio::task::spawn_blocking(move || {
+                            ChatHistory::session_path(&sid).and_then(|p| {
+                                if p.exists() { Ok(()) } else { Err("not found".into()) }
+                            }).is_ok()
+                        }).await.unwrap_or(false);
+
+                        if session_path_exists {
+                            current_session.set(Some(session.id.clone()));
+                            current_view.set(AppView::ChatMode(session.mode));
+                            messages.write().clear();
+                            arena_messages.write().clear();
+                        } else {
+                            sessions.write().retain(|s| s.id != session_id);
+                        }
+                    }
+                }
+
+                // Refresh sessions list
+                let sessions_result = tokio::task::spawn_blocking(|| ChatHistory::list_sessions()).await;
+                if let Ok(Ok(new_sessions)) = sessions_result {
+                    sessions.set(new_sessions);
                 }
 
                 is_loading.set(false);
             });
+        }
+    };
+
+    // Handler for selecting a session
+    let select_session = {
+        let mut confirm_dialog_open = confirm_dialog_open.clone();
+        let mut pending_navigation = pending_navigation.clone();
+
+        move |session_id: String| {
+            // Check for active runs on current session
+            let sid = current_session.read().clone();
+            let has_active = active_runs.read().values().any(|run| {
+                run.session_id == sid
+                    && matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
+            });
+
+            if has_active {
+                pending_navigation.set(Some(session_id));
+                confirm_dialog_open.set(true);
+            } else {
+                execute_navigation(session_id);
+            }
         }
     };
 
     // Handler for creating new chat
     let new_chat = {
-        let mut sessions_clone = sessions.clone();
-        let mut current_view = current_view.clone();
-        let mut messages = messages.clone();
-        let mut arena_messages = arena_messages.clone();
-        let mut current_session = current_session.clone();
-        let mut is_loading = is_loading.clone();
+        let mut confirm_dialog_open = confirm_dialog_open.clone();
+        let mut pending_navigation = pending_navigation.clone();
 
         move |_| {
-            is_loading.set(true);
-            let mut sessions_clone = sessions_clone.clone();
-            let mut current_view = current_view.clone();
-            let mut messages = messages.clone();
-            let mut arena_messages = arena_messages.clone();
-            let mut current_session = current_session.clone();
-            let mut is_loading = is_loading.clone();
-
-            spawn(async move {
-                // Small delay to ensure UI updates
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-                current_view.set(AppView::NewChat);
-                messages.write().clear();
-                arena_messages.write().clear();
-                current_session.set(None);
-                
-                // Refresh sessions list to pick up any new or renamed sessions
-                let sessions_result = tokio::task::spawn_blocking(|| ChatHistory::list_sessions()).await;
-                
-                match sessions_result {
-                    Ok(Ok(new_sessions)) => {
-                        sessions_clone.set(new_sessions);
-                    }
-                    Ok(Err(e)) => {
-                        eprintln!("Failed to refresh sessions: {}", e);
-                    }
-                    Err(e) => {
-                        eprintln!("Task join error: {}", e);
-                    }
-                }
-                
-                is_loading.set(false);
+            let sid = current_session.read().clone();
+            let has_active = active_runs.read().values().any(|run| {
+                run.session_id == sid
+                    && matches!(run.status, RunStatus::Running | RunStatus::Cancelling)
             });
+
+            if has_active {
+                pending_navigation.set(Some("new_chat".to_string()));
+                confirm_dialog_open.set(true);
+            } else {
+                execute_navigation("new_chat".to_string());
+            }
         }
     };
 
-    // Handler for mode selection from NewChat view.
-    // Do not add to sessions here — session is added only on first save (when there is content).
+    // Handler for mode selection — saves a draft session to disk immediately.
     let select_mode = move |mode: ChatMode| {
         let timestamp = ChatHistory::format_timestamp();
-        let title = format!("{} Chat", mode.name());
+        let title = format!("New {} Chat", mode.name());
         let session_id = ChatHistory::generate_session_id(mode, &timestamp, &title);
+
+        // Create an empty draft session and save to disk immediately
+        let session = ChatSession {
+            id: session_id.clone(),
+            title: title.clone(),
+            mode,
+            timestamp: timestamp.clone(),
+        };
+        let history = empty_history_for_mode(mode);
+        let session_data = SessionData {
+            session: session.clone(),
+            history,
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+
+        let sd_for_save = session_data.clone();
+        let mut sessions_for_add = sessions.clone();
+        let session_for_add = session.clone();
+
+        // Save to disk and add to sidebar immediately
+        spawn(async move {
+            match tokio::task::spawn_blocking(move || ChatHistory::save_session(&sd_for_save)).await {
+                Ok(Ok(_)) => {
+                    // Add to sessions list
+                    if !sessions_for_add.read().iter().any(|s| s.id == session_for_add.id) {
+                        sessions_for_add.write().push(session_for_add);
+                    }
+                }
+                Ok(Err(e)) => eprintln!("Failed to save draft session: {}", e),
+                Err(e) => eprintln!("Failed to save draft session task: {}", e),
+            }
+        });
+
         current_session.set(Some(session_id));
         current_view.set(AppView::ChatMode(mode));
         messages.write().clear();
         arena_messages.write().clear();
     };
 
-    // Called by mode components when they save a session for the first time (with content).
-    // Ensures the session appears in the sidebar only after real activity.
+    // Called by mode components when they save a session.
+    // Always updates the session (updates title, etc.) in the sidebar.
     let on_session_saved = move |session: ChatSession| {
-        if !sessions.read().iter().any(|s| s.id == session.id) {
+        let mut found = false;
+        sessions.write().iter_mut().for_each(|s| {
+            if s.id == session.id {
+                *s = session.clone();
+                found = true;
+            }
+        });
+        if !found {
             sessions.write().push(session);
+        }
+    };
+
+    // Save error callback — surfaces errors as toasts
+    let on_save_error = move |error_msg: String| {
+        add_toast(toasts, ToastType::Error, error_msg);
+    };
+
+    // Handler for deleting a session
+    let delete_session = {
+        let mut active_runs = active_runs.clone();
+        let mut current_session = current_session.clone();
+        let mut current_view = current_view.clone();
+        let mut messages = messages.clone();
+        let mut arena_messages = arena_messages.clone();
+
+        move |session_id: String| {
+            let sid = session_id.clone();
+            let is_current = current_session.read().as_ref() == Some(&sid);
+            let mut toasts = toasts.clone();
+            let mut sessions = sessions.clone();
+            let mut active_runs = active_runs.clone();
+            let mut current_session = current_session.clone();
+            let mut current_view = current_view.clone();
+            let mut messages = messages.clone();
+            let mut arena_messages = arena_messages.clone();
+
+            spawn(async move {
+                // Cancel any active runs for this session
+                let run_ids: Vec<String> = active_runs
+                    .read()
+                    .iter()
+                    .filter(|(_, run)| run.session_id == Some(sid.clone()))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for run_id in &run_ids {
+                    if let Some(run) = active_runs.write().get_mut(run_id) {
+                        run.request_cancel();
+                        run.task.cancel();
+                    }
+                    active_runs.write().remove(run_id);
+                }
+
+                // Delete from disk
+                let sid_for_delete = sid.clone();
+                match tokio::task::spawn_blocking(move || ChatHistory::delete_session(&sid_for_delete)).await {
+                    Ok(Ok(_)) => {
+                        sessions.write().retain(|s| s.id != sid);
+                        if is_current {
+                            current_session.set(None);
+                            current_view.set(AppView::NewChat);
+                            messages.write().clear();
+                            arena_messages.write().clear();
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        add_toast(toasts, ToastType::Error, format!("Failed to delete chat: {}", e));
+                    }
+                    Err(e) => {
+                        add_toast(toasts, ToastType::Error, format!("Failed to delete chat: {}", e));
+                    }
+                }
+            });
+        }
+    };
+
+    // Confirmation dialog handlers
+    let confirm_navigation = {
+        let mut confirm_dialog_open = confirm_dialog_open.clone();
+        let mut pending_navigation = pending_navigation.clone();
+
+        move |_| {
+            confirm_dialog_open.set(false);
+            if let Some(target) = pending_navigation.take() {
+                cancel_current_runs();
+                execute_navigation(target);
+            }
+        }
+    };
+
+    let cancel_navigation = {
+        let mut confirm_dialog_open = confirm_dialog_open.clone();
+
+        move |_| {
+            confirm_dialog_open.set(false);
         }
     };
 
@@ -382,7 +597,6 @@ fn App() -> Element {
         let id = *message_counter.read();
         message_counter.set(id + 1);
 
-        // Add user message
         messages.write().push(Message {
             id,
             content: text.clone(),
@@ -391,7 +605,6 @@ fn App() -> Element {
             timestamp: "Just now".to_string(),
         });
 
-        // Simulate bot response
         let bot_id = id + 1;
         message_counter.set(bot_id + 1);
         messages.write().push(Message {
@@ -409,7 +622,6 @@ fn App() -> Element {
 
         match mode {
             ChatMode::PvP => {
-                // Add user message first
                 messages.write().push(Message {
                     id: base_id,
                     content: text.clone(),
@@ -418,7 +630,6 @@ fn App() -> Element {
                     timestamp: "Just now".to_string(),
                 });
 
-                // Add responses from Bot 1, Bot 2, and Moderator
                 messages.write().push(Message {
                     id: base_id + 1,
                     content: format!("Bot 1's response to: '{}'", text),
@@ -447,7 +658,6 @@ fn App() -> Element {
                 message_counter.set(base_id + 4);
             }
             ChatMode::Collaborative => {
-                // Add user message
                 messages.write().push(Message {
                     id: base_id,
                     content: text.clone(),
@@ -456,7 +666,6 @@ fn App() -> Element {
                     timestamp: "Just now".to_string(),
                 });
 
-                // Add collaborative responses
                 for i in 0..3 {
                     messages.write().push(Message {
                         id: base_id + i + 1,
@@ -469,7 +678,6 @@ fn App() -> Element {
                 message_counter.set(base_id + 4);
             }
             ChatMode::Competitive => {
-                // Add user message
                 messages.write().push(Message {
                     id: base_id,
                     content: text.clone(),
@@ -478,7 +686,6 @@ fn App() -> Element {
                     timestamp: "Just now".to_string(),
                 });
 
-                // Add competitive responses
                 for i in 0..3 {
                     messages.write().push(Message {
                         id: base_id + i + 1,
@@ -496,7 +703,6 @@ fn App() -> Element {
                 message_counter.set(base_id + 4);
             }
             ChatMode::LLMChoice => {
-                // Add user message
                 messages.write().push(Message {
                     id: base_id,
                     content: text,
@@ -539,6 +745,7 @@ fn App() -> Element {
                     collapsed: sidebar_collapsed,
                     on_new_chat: new_chat,
                     on_select_session: select_session,
+                    on_delete_session: delete_session,
                 }
 
                 // Main content area
@@ -577,6 +784,7 @@ fn App() -> Element {
                                             input_settings,
                                             session_id,
                                             on_session_saved,
+                                            on_save_error,
                                         }
                                     },
                                     ChatMode::PvP => rsx! {
@@ -586,6 +794,7 @@ fn App() -> Element {
                                             input_settings,
                                             session_id,
                                             on_session_saved,
+                                            on_save_error,
                                         }
                                     },
                                     ChatMode::Collaborative => rsx! {
@@ -595,6 +804,7 @@ fn App() -> Element {
                                             input_settings,
                                             session_id,
                                             on_session_saved,
+                                            on_save_error,
                                         }
                                     },
                                     ChatMode::Competitive => rsx! {
@@ -604,6 +814,7 @@ fn App() -> Element {
                                             input_settings,
                                             session_id,
                                             on_session_saved,
+                                            on_save_error,
                                         }
                                     },
                                     ChatMode::LLMChoice => rsx! {
@@ -613,6 +824,7 @@ fn App() -> Element {
                                             input_settings,
                                             session_id,
                                             on_session_saved,
+                                            on_save_error,
                                         }
                                     },
                                 }
@@ -630,7 +842,7 @@ fn App() -> Element {
                         }
                     }
                 }
-                
+
                 // Loading Overlay
                 if *is_loading.read() {
                     div {
@@ -646,6 +858,23 @@ fn App() -> Element {
                             }
                         }
                     }
+                }
+
+                // Confirmation dialog for navigating away during active streaming
+                ConfirmDialog {
+                    theme,
+                    open: confirm_dialog_open,
+                    title: "Response in progress".to_string(),
+                    message: "A response is still being generated. Leaving will cancel it. Continue?".to_string(),
+                    confirm_label: "Leave".to_string(),
+                    confirm_danger: true,
+                    on_confirm: confirm_navigation,
+                    on_cancel: cancel_navigation,
+                }
+
+                // Toast notifications
+                ToastContainer {
+                    toasts,
                 }
             }
         }

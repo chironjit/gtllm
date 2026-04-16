@@ -9,6 +9,7 @@ pub fn Sidebar(
     collapsed: Signal<bool>,
     on_new_chat: EventHandler<()>,
     on_select_session: EventHandler<String>,
+    on_delete_session: EventHandler<String>,
 ) -> Element {
     let _ = theme.read();
     let is_collapsed = *collapsed.read();
@@ -81,92 +82,121 @@ pub fn Sidebar(
                                 {
                                     let is_active = current_session.read().as_ref() == Some(&session.id);
                                     let session_id_for_click = session.id.clone();
+                                    let session_id_for_delete = session.id.clone();
 
                                     rsx! {
-                                        button {
+                                        div {
                                             key: "{session.id}",
-                                            onclick: move |_| {
-                                                let sid = session_id_for_click.clone();
-                                                on_select_session.call(sid);
-                                            },
-                                            class: "w-full rounded-lg transition-all duration-200",
-                                            class: if is_collapsed {
-                                                "p-2 flex items-center justify-center"
-                                            } else {
-                                                "text-left px-2.5 py-2"
-                                            },
-                                            class: if is_active {
-                                                "bg-[var(--color-primary)]/10 border border-[var(--color-primary)]"
-                                            } else {
-                                                "hover:bg-[var(--color-base-300)]/50"
-                                            },
-                                            title: if is_collapsed { "{session.title}" } else { "" },
+                                            class: "group relative w-full",
 
-                                            if is_collapsed {
-                                                // Collapsed view: just the icon
-                                                div {
-                                                    class: "shrink-0",
-                                                    match session.mode.name() {
-                                                        "Standard" => rsx! {
-                                                            img { src: asset!("/assets/message.svg"), class: "w-4 h-4", alt: "Standard" }
-                                                        },
-                                                        "PvP" => rsx! {
-                                                            img { src: asset!("/assets/pvp.svg"), class: "w-4 h-4", alt: "PvP" }
-                                                        },
-                                                        "Collaborative" => rsx! {
-                                                            img { src: asset!("/assets/collaborative.svg"), class: "w-4 h-4", alt: "Collaborative" }
-                                                        },
-                                                        "Competitive" => rsx! {
-                                                            img { src: asset!("/assets/competitive.svg"), class: "w-4 h-4", alt: "Competitive" }
-                                                        },
-                                                        "LLM's Choice" => rsx! {
-                                                            img { src: asset!("/assets/choice.svg"), class: "w-4 h-4", alt: "Choice" }
-                                                        },
-                                                        _ => rsx! {
-                                                            img { src: asset!("/assets/message.svg"), class: "w-4 h-4", alt: "Chat" }
-                                                        },
-                                                    }
-                                                }
-                                            } else {
-                                                // Expanded view: full layout
-                                                div {
-                                                    class: "flex items-center gap-2.5",
+                                            button {
+                                                class: "w-full rounded-lg transition-all duration-200",
+                                                class: if is_collapsed {
+                                                    "p-2 flex items-center justify-center"
+                                                } else {
+                                                    "text-left px-2.5 py-2"
+                                                },
+                                                class: if is_active {
+                                                    "bg-[var(--color-primary)]/10 border border border-[var(--color-primary)]"
+                                                } else {
+                                                    "hover:bg-[var(--color-base-300)]/50"
+                                                },
+                                                title: if is_collapsed { "{session.title}" } else { "" },
+                                                onclick: move |_| {
+                                                    let sid = session_id_for_click.clone();
+                                                    on_select_session.call(sid);
+                                                },
 
-                                                    // Mode icon
+                                                if is_collapsed {
+                                                    // Collapsed view: just the icon
                                                     div {
                                                         class: "shrink-0",
                                                         match session.mode.name() {
                                                             "Standard" => rsx! {
-                                                                img { src: asset!("/assets/message.svg"), class: "w-3.5 h-3.5", alt: "Standard" }
+                                                                img { src: asset!("/assets/message.svg"), class: "w-4 h-4", alt: "Standard" }
                                                             },
                                                             "PvP" => rsx! {
-                                                                img { src: asset!("/assets/pvp.svg"), class: "w-3.5 h-3.5", alt: "PvP" }
+                                                                img { src: asset!("/assets/pvp.svg"), class: "w-4 h-4", alt: "PvP" }
                                                             },
                                                             "Collaborative" => rsx! {
-                                                                img { src: asset!("/assets/collaborative.svg"), class: "w-3.5 h-3.5", alt: "Collaborative" }
+                                                                img { src: asset!("/assets/collaborative.svg"), class: "w-4 h-4", alt: "Collaborative" }
                                                             },
                                                             "Competitive" => rsx! {
-                                                                img { src: asset!("/assets/competitive.svg"), class: "w-3.5 h-3.5", alt: "Competitive" }
+                                                                img { src: asset!("/assets/competitive.svg"), class: "w-4 h-4", alt: "Competitive" }
                                                             },
                                                             "LLM's Choice" => rsx! {
-                                                                img { src: asset!("/assets/choice.svg"), class: "w-3.5 h-3.5", alt: "Choice" }
+                                                                img { src: asset!("/assets/choice.svg"), class: "w-4 h-4", alt: "Choice" }
                                                             },
                                                             _ => rsx! {
-                                                                img { src: asset!("/assets/message.svg"), class: "w-3.5 h-3.5", alt: "Chat" }
+                                                                img { src: asset!("/assets/message.svg"), class: "w-4 h-4", alt: "Chat" }
                                                             },
                                                         }
                                                     }
-
-                                                    // Session info
+                                                } else {
+                                                    // Expanded view: full layout
                                                     div {
-                                                        class: "flex-1 min-w-0",
+                                                        class: "flex items-center gap-2.5",
+
+                                                        // Mode icon
                                                         div {
-                                                            class: "text-xs font-medium text-[var(--color-base-content)] truncate",
-                                                            "{session.title}"
+                                                            class: "shrink-0",
+                                                            match session.mode.name() {
+                                                                "Standard" => rsx! {
+                                                                    img { src: asset!("/assets/message.svg"), class: "w-3.5 h-3.5", alt: "Standard" }
+                                                                },
+                                                                "PvP" => rsx! {
+                                                                    img { src: asset!("/assets/pvp.svg"), class: "w-3.5 h-3.5", alt: "PvP" }
+                                                                },
+                                                                "Collaborative" => rsx! {
+                                                                    img { src: asset!("/assets/collaborative.svg"), class: "w-3.5 h-3.5", alt: "Collaborative" }
+                                                                },
+                                                                "Competitive" => rsx! {
+                                                                    img { src: asset!("/assets/competitive.svg"), class: "w-3.5 h-3.5", alt: "Competitive" }
+                                                                },
+                                                                "LLM's Choice" => rsx! {
+                                                                    img { src: asset!("/assets/choice.svg"), class: "w-3.5 h-3.5", alt: "Choice" }
+                                                                },
+                                                                _ => rsx! {
+                                                                    img { src: asset!("/assets/message.svg"), class: "w-3.5 h-3.5", alt: "Chat" }
+                                                                },
+                                                            }
                                                         }
+
+                                                        // Session info
                                                         div {
-                                                            class: "text-[10px] text-[var(--color-base-content)]/50 mt-0.5",
-                                                            "{session.mode.name()} • {ChatHistory::format_timestamp_date(&session.timestamp)}"
+                                                            class: "flex-1 min-w-0",
+                                                            div {
+                                                                class: "text-xs font-medium text-[var(--color-base-content)] truncate",
+                                                                "{session.title}"
+                                                            }
+                                                            div {
+                                                                class: "text-[10px] text-[var(--color-base-content)]/50 mt-0.5",
+                                                                "{session.mode.name()} • {ChatHistory::format_timestamp_date(&session.timestamp)}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Delete button — visible on hover, not on active session
+                                            if !is_active && !is_collapsed {
+                                                button {
+                                                    class: "absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity text-[var(--color-base-content)]/40 hover:text-red-500 hover:bg-red-500/10",
+                                                    title: "Delete chat",
+                                                    onclick: move |evt: MouseEvent| {
+                                                        evt.stop_propagation();
+                                                        let sid = session_id_for_delete.clone();
+                                                        on_delete_session.call(sid);
+                                                    },
+
+                                                    svg {
+                                                        class: "w-3.5 h-3.5",
+                                                        fill: "none",
+                                                        view_box: "0 0 24 24",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        path {
+                                                            d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
                                                         }
                                                     }
                                                 }

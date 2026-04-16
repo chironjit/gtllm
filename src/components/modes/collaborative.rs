@@ -1,10 +1,10 @@
-use super::common::{ChatInput, FormattedText, PromptCard, PromptEditorModal, PromptType};
+use super::common::{ChatInput, FormattedText, PromptCard, PromptEditorModal, PromptType, ThinkingIndicator};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel,
     recv_multi_event_with_cancel, register_active_run, remove_run, set_run_status,
-    try_signal_read, try_signal_set, try_signal_update, ActiveRunRecord, ChatHistory,
-    ChatMessage, ChatMode, ChatSession, InputSettings, Model, OpenRouterClient, RunStatus,
-    SessionData, StreamEvent, Theme,
+    try_signal_read, try_signal_set, try_signal_update, upsert_session, ActiveRunRecord,
+    ChatHistory, ChatMessage, ChatMode, ChatSession, InputSettings, Model, OpenRouterClient,
+    RunStatus, SessionData, StreamEvent, Theme,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -110,11 +110,12 @@ pub struct CollaborativeProps {
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
     on_session_saved: EventHandler<ChatSession>,
+    on_save_error: EventHandler<String>,
 }
 
 impl PartialEq for CollaborativeProps {
     fn eq(&self, other: &Self) -> bool {
-        self.theme == other.theme 
+        self.theme == other.theme
             && self.input_settings == other.input_settings
             && self.session_id == other.session_id
     }
@@ -131,6 +132,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
     let client_for_send = props.client;
     let input_settings = props.input_settings;
     let active_runs = use_context::<Signal<HashMap<String, ActiveRunRecord>>>();
+    let sessions = use_context::<Signal<Vec<ChatSession>>>();
     let _ = theme.read();
 
     // Prompt templates
@@ -325,8 +327,9 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
             let mut conversation_history_clone = conversation_history.clone();
             let templates = prompt_templates.read().clone();
             let session_id_for_save = props.session_id.clone();
-            let on_session_saved = props.on_session_saved.clone();
+            let mut sessions_for_task = sessions.clone();
             let selected_models_for_save = selected_models.read().clone();
+            let on_save_error_for_task = props.on_save_error.clone();
             let run_id = create_run_id(ChatMode::Collaborative, &props.session_id);
             current_run_id.set(Some(run_id.clone()));
             let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -747,9 +750,9 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                     updated_at: ChatHistory::format_timestamp(),
                                 };
                                 match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                                    Err(e) => eprintln!("Failed to save session task: {}", e),
-                                    Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                                    Ok(Ok(_)) => on_session_saved.call(session),
+                                    Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                                 }
                             }
                         }
@@ -813,9 +816,9 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                     updated_at: ChatHistory::format_timestamp(),
                                 };
                                 match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                                    Err(e) => eprintln!("Failed to save session task: {}", e),
-                                    Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                                    Ok(Ok(_)) => on_session_saved.call(session),
+                                    Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                                 }
                             }
                         }
@@ -1279,7 +1282,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                             }
 
                             // Streaming indicators
-                            if *is_processing.read() && !current_streaming_responses.read().is_empty() {
+                            if *is_processing.read() {
                                 div {
                                     class: "mb-6",
 
@@ -1294,39 +1297,52 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                         }
                                     }
 
-                                    div {
-                                        class: if *current_phase.read() == CollaborativePhase::Consensus {
-                                            "bg-green-500/10 rounded-lg p-4 border-2 border-green-500/50"
+                                    {
+                                        let streaming = current_streaming_responses.read();
+                                        if streaming.is_empty() {
+                                            rsx! { ThinkingIndicator {} }
                                         } else {
-                                            "grid grid-cols-1 md:grid-cols-2 gap-3"
-                                        },
-
-                                        for (model_id, content) in current_streaming_responses.read().iter() {
-                                            div {
-                                                key: "{model_id}",
-                                                class: if *current_phase.read() != CollaborativePhase::Consensus {
-                                                    "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]"
-                                                } else {
-                                                    ""
-                                                },
-
+                                            rsx! {
                                                 div {
-                                                    class: "text-sm font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2",
-                                                    if model_id == "consensus" {
-                                                        span { "🎯 Synthesizing Collaborative Answer..." }
+                                                    class: if *current_phase.read() == CollaborativePhase::Consensus {
+                                                        "bg-green-500/10 rounded-lg p-4 border-2 border-green-500/50"
                                                     } else {
-                                                        span { "{model_id}" }
-                                                    }
-                                                    span {
-                                                        class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
-                                                    }
-                                                }
+                                                        "grid grid-cols-1 md:grid-cols-2 gap-3"
+                                                    },
 
-                                                div {
-                                                    class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
-                                                    div {
-                                                        class: "whitespace-pre-wrap break-words",
-                                                        "{content}"
+                                                    for (model_id, content) in streaming.iter() {
+                                                        div {
+                                                            key: "{model_id}",
+                                                            class: if *current_phase.read() != CollaborativePhase::Consensus {
+                                                                "bg-[var(--color-base-200)] rounded-lg p-4 border border-[var(--color-base-300)]"
+                                                            } else {
+                                                                ""
+                                                            },
+
+                                                            div {
+                                                                class: "text-sm font-bold text-[var(--color-base-content)] mb-2 flex items-center gap-2",
+                                                                if model_id == "consensus" {
+                                                                    span { "🎯 Synthesizing Collaborative Answer..." }
+                                                                } else {
+                                                                    span { "{model_id}" }
+                                                                }
+                                                                span {
+                                                                    class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
+                                                                }
+                                                            }
+
+                                                            div {
+                                                                class: "text-sm text-[var(--color-base-content)] min-h-[3rem]",
+                                                                if content.is_empty() {
+                                                                    ThinkingIndicator {}
+                                                                } else {
+                                                                    div {
+                                                                        class: "whitespace-pre-wrap break-words",
+                                                                        "{content}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1367,6 +1383,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                 ChatInput {
                     theme,
                     input_settings,
+                    is_streaming: *is_processing.read(),
                     on_send: send_message,
                 }
             }

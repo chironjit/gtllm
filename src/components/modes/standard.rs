@@ -1,9 +1,9 @@
-use super::common::{ChatInput, FormattedText, Modal, ModelSelector};
+use super::common::{ChatInput, FormattedText, Modal, ModelSelector, ThinkingIndicator};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel, register_active_run,
-    remove_run, set_run_status, try_signal_read, try_signal_set, try_signal_update,
-    ActiveRunRecord, ChatMessage, ChatHistory, ChatMode, ChatSession, InputSettings,
-    OpenRouterClient, RunStatus, SessionData, StandardHistory, StreamEvent, Theme,
+    remove_run, set_run_status, try_signal_read, try_signal_set, try_signal_update, upsert_session,
+    ActiveRunRecord, ChatMessage, ChatHistory, ChatMode, ChatSession, InputSettings, OpenRouterClient,
+    RunStatus, SessionData, StandardHistory, StreamEvent, Theme,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -68,6 +68,7 @@ pub struct StandardProps {
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
     on_session_saved: EventHandler<ChatSession>,
+    on_save_error: EventHandler<String>,
 }
 
 impl PartialEq for StandardProps {
@@ -86,6 +87,7 @@ pub fn Standard(props: StandardProps) -> Element {
     let client_for_send = props.client;
     let input_settings = props.input_settings;
     let active_runs = use_context::<Signal<HashMap<String, ActiveRunRecord>>>();
+    let sessions = use_context::<Signal<Vec<ChatSession>>>();
     let _ = theme.read();
     let mut selected_models = use_signal(|| Vec::<String>::new());
     let mut user_messages = use_signal(|| Vec::<String>::new());
@@ -239,6 +241,21 @@ pub fn Standard(props: StandardProps) -> Element {
         current_run_id.set(None);
     }
 
+    // Cancel active run when component unmounts
+    {
+        let mut active_runs = active_runs.clone();
+        let current_run_id = current_run_id.clone();
+        use_drop(move || {
+            if let Some(run_id) = current_run_id.try_read().ok().and_then(|id| id.clone()) {
+                if let Some(run) = active_runs.try_read().ok().and_then(|runs| runs.get(&run_id).cloned()) {
+                    run.request_cancel();
+                    run.task.cancel();
+                }
+                remove_run(active_runs, &run_id);
+            }
+        });
+    }
+
     // Handle sending a message
     let send_message = move |text: String| {
         if text.trim().is_empty() || *is_streaming.read() || run_is_active {
@@ -263,10 +280,11 @@ pub fn Standard(props: StandardProps) -> Element {
             let mut model_responses_clone = model_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let session_id_for_save = props.session_id.clone();
-            let on_session_saved = props.on_session_saved.clone();
+            let mut sessions_for_task = sessions.clone();
             let user_messages_save = user_messages.clone();
             let selected_models_save = selected_models.clone();
             let system_prompt_save = system_prompt.clone();
+            let on_save_error_for_task = props.on_save_error.clone();
             let cancel_flag = Arc::new(AtomicBool::new(false));
             let run_id = create_run_id(ChatMode::Standard, &props.session_id);
             current_run_id.set(Some(run_id.clone()));
@@ -615,9 +633,9 @@ pub fn Standard(props: StandardProps) -> Element {
                         updated_at: ChatHistory::format_timestamp(),
                     };
                     match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                        Err(e) => eprintln!("Failed to save session task: {}", e),
-                        Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                        Ok(Ok(_)) => on_session_saved.call(session),
+                        Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                        Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                        Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                     }
                 }
                 if cancel_flag_for_task.load(Ordering::SeqCst) {
@@ -964,6 +982,9 @@ pub fn Standard(props: StandardProps) -> Element {
                                                                 "{streaming.content}"
                                                             }
                                                         }
+                                                    } else {
+                                                        // No tokens yet — show thinking indicator
+                                                        ThinkingIndicator {}
                                                     }
                                                     if let Some(streaming) = streaming_responses.get(&models[0]) {
                                                         // Only show metrics if not an error (errors complete immediately)
@@ -1039,6 +1060,9 @@ pub fn Standard(props: StandardProps) -> Element {
                                                                     }
                                                                 }
                                                             }
+                                                        } else {
+                                                            // No tokens yet — show thinking indicator
+                                                            ThinkingIndicator {}
                                                         }
                                                         if let Some(streaming) = streaming_responses.get(model_id) {
                                                             // Only show metrics if not an error (errors complete immediately)
@@ -1106,6 +1130,7 @@ pub fn Standard(props: StandardProps) -> Element {
                 ChatInput {
                     theme,
                     input_settings,
+                    is_streaming: *is_streaming.read(),
                     on_send: send_message,
                 }
             }

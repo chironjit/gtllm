@@ -1,13 +1,12 @@
-use super::common::{ChatInput, FormattedText, Modal, ModelSelector, ModelResponseCard};
+use super::common::{ChatInput, FormattedText, Modal, ModelSelector, ModelResponseCard, ThinkingIndicator};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel,
     recv_multi_event_with_cancel, register_active_run, remove_run, set_run_status,
-    try_signal_read, try_signal_set, try_signal_update, ActiveRunRecord, ChatHistory,
-    ChatMessage, ChatMode, ChatSession, InputSettings, OpenRouterClient, RunStatus, SessionData,
-    StreamEvent, Theme,
+    try_signal_read, try_signal_set, try_signal_update, upsert_session, ActiveRunRecord,
+    ChatHistory, ChatMessage, ChatMode, ChatSession, InputSettings, OpenRouterClient, RunStatus,
+    SessionData, StreamEvent, Theme,
 };
 use dioxus::prelude::*;
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -281,6 +280,7 @@ pub struct ChoiceProps {
     input_settings: Signal<InputSettings>,
     session_id: Option<String>,
     on_session_saved: EventHandler<ChatSession>,
+    on_save_error: EventHandler<String>,
 }
 
 impl PartialEq for ChoiceProps {
@@ -302,6 +302,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
     let client_for_send = props.client;
     let input_settings = props.input_settings;
     let active_runs = use_context::<Signal<HashMap<String, ActiveRunRecord>>>();
+    let sessions = use_context::<Signal<Vec<ChatSession>>>();
     let _ = theme.read();
 
     // Model selection state
@@ -446,6 +447,10 @@ pub fn Choice(props: ChoiceProps) -> Element {
         let current_run_id = current_run_id.clone();
         use_drop(move || {
             if let Some(run_id) = current_run_id.try_read().ok().and_then(|id| id.clone()) {
+                if let Some(run) = active_runs.try_read().ok().and_then(|runs| runs.get(&run_id).cloned()) {
+                    run.request_cancel();
+                    run.task.cancel();
+                }
                 remove_run(active_runs, &run_id);
             }
         });
@@ -471,8 +476,9 @@ pub fn Choice(props: ChoiceProps) -> Element {
             let mut current_streaming_clone = current_streaming_responses.clone();
             let mut conversation_history_clone = conversation_history.clone();
             let session_id_for_save = props.session_id.clone();
-            let on_session_saved = props.on_session_saved.clone();
+            let mut sessions_for_task = sessions.clone();
             let selected_models_for_save = selected_models.read().clone();
+            let on_save_error_for_task = props.on_save_error.clone();
             let run_id = create_run_id(ChatMode::LLMChoice, &props.session_id);
             current_run_id.set(Some(run_id.clone()));
             let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -662,6 +668,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     &prompts.competitive,
                                     current_streaming_clone,
                                     conversation_history_clone,
+                                    cancel_flag_for_task.clone(),
                                 ).await;
                             }
                         }
@@ -719,9 +726,9 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     updated_at: ChatHistory::format_timestamp(),
                                 };
                                 match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                                    Err(e) => eprintln!("Failed to save session task: {}", e),
-                                    Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                                    Ok(Ok(_)) => on_session_saved.call(session),
+                                    Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                                 }
                             }
                         }
@@ -788,15 +795,19 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                     updated_at: ChatHistory::format_timestamp(),
                                 };
                                 match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                                    Err(e) => eprintln!("Failed to save session task: {}", e),
-                                    Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                                    Ok(Ok(_)) => on_session_saved.call(session),
+                                    Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                                    Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                                 }
                             }
                         }
                     }
                 }
-                remove_run(active_runs_for_task, &run_id_for_task);
+                if cancel_flag_for_task.load(Ordering::SeqCst) {
+                    set_run_status(active_runs_for_task, &run_id_for_task, RunStatus::Cancelled);
+                } else {
+                    remove_run(active_runs_for_task, &run_id_for_task);
+                }
             });
 
             register_active_run(
@@ -1250,7 +1261,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                             }
 
                             // Streaming indicators
-                            if *is_processing.read() && !current_streaming_responses.read().is_empty() {
+                            if *is_processing.read() {
                                 div {
                                     class: "mb-6",
                                     div {
@@ -1276,9 +1287,13 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         class: "inline-block w-2 h-2 bg-[var(--color-primary)] rounded-full animate-pulse"
                                                     }
                                                 }
-                                                div {
-                                                    class: "text-sm sm:text-base text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
-                                                    "{content}"
+                                                if content.is_empty() {
+                                                    ThinkingIndicator {}
+                                                } else {
+                                                    div {
+                                                        class: "text-sm sm:text-base text-[var(--color-base-content)] whitespace-pre-wrap min-h-[3rem]",
+                                                        "{content}"
+                                                    }
                                                 }
                                             }
                                         }
@@ -1304,10 +1319,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                             onclick: move |_| {
                                 if let Some(run) = active_runs.read().get(&active_run_id).cloned() {
                                     run.request_cancel();
-                                    run.task.cancel();
                                     set_run_status(active_runs, &active_run_id, RunStatus::Cancelling);
-                                    remove_run(active_runs, &active_run_id);
-                                    is_processing.set(false);
                                 }
                             },
                             disabled: is_cancelling,
@@ -1322,6 +1334,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                     theme,
                     input_settings,
                     on_send: send_message,
+                    is_streaming: *is_processing.read(),
                 }
             }
             
@@ -1461,37 +1474,35 @@ async fn execute_collaborative(
         let mut last_update = std::time::Instant::now();
         const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
 
-        while let Some(event) = rx.recv().await {
+        while let Some(event) = recv_multi_event_with_cancel(&mut rx, &cancel_flag).await {
+            if cancel_flag.load(Ordering::SeqCst) {
+                break;
+            }
             let model_id = event.model_id.clone();
 
             match event.event {
                 StreamEvent::Content(content) => {
-                    // Accumulate in buffer instead of writing immediately
                     content_buffer
                         .entry(model_id.clone())
                         .and_modify(|s| s.push_str(&content))
                         .or_insert(content);
-                    
-                    // Throttle updates: only write to signal every 16ms
+
                     if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
-                        // Flush only the active model to reduce cloning work.
                         if let Some(accumulated) = content_buffer.get(&model_id) {
                             let _ = try_signal_update(&mut current_streaming, |responses| {
                                 responses.insert(model_id.clone(), accumulated.clone());
                             });
                         }
-                        
                         last_update = std::time::Instant::now();
                     }
                 }
                 StreamEvent::Done => {
-                    // Flush final accumulated content
                     if let Some(accumulated) = content_buffer.get(&model_id) {
                         let _ = try_signal_update(&mut current_streaming, |responses| {
                             responses.insert(model_id.clone(), accumulated.clone());
                         });
                     }
-                    
+
                     let final_content = try_signal_read(&current_streaming, |responses| {
                         responses.get(&model_id).cloned().unwrap_or_default()
                     })
@@ -1512,6 +1523,9 @@ async fn execute_collaborative(
                     }
                 }
                 StreamEvent::Error(e) => {
+                    if e == "Cancelled" {
+                        break;
+                    }
                     phase1_results.insert(
                         model_id.clone(),
                         ModelResponse {
@@ -1523,6 +1537,10 @@ async fn execute_collaborative(
                     done_models.insert(model_id);
                 }
             }
+        }
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return;
         }
     }
 
@@ -1564,7 +1582,10 @@ async fn execute_collaborative(
 
             if let Ok(mut stream) = client.stream_chat_completion(model_id.clone(), review_messages).await {
                 let mut review_content = String::new();
-                while let Some(event) = stream.next().await {
+                while let Some(event) = next_stream_event_with_cancel(&mut stream, &cancel_flag).await {
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
                     match event {
                         StreamEvent::Content(content) => {
                             review_content.push_str(&content);
@@ -1578,6 +1599,9 @@ async fn execute_collaborative(
                             break;
                         }
                         StreamEvent::Error(e) => {
+                            if e == "Cancelled" {
+                                break;
+                            }
                             phase2_reviews.push(ModelResponse {
                                 model_id: model_id.clone(),
                                 content: String::new(),
@@ -1588,7 +1612,15 @@ async fn execute_collaborative(
                     }
                 }
             }
+
+            if cancel_flag.load(Ordering::SeqCst) {
+                break;
+            }
         }
+    }
+
+    if cancel_flag.load(Ordering::SeqCst) {
+        return;
     }
 
     // Phase 3: Consensus
@@ -1620,7 +1652,10 @@ async fn execute_collaborative(
 
     match client.stream_chat_completion(synthesizer_id.clone(), consensus_messages).await {
         Ok(mut stream) => {
-            while let Some(event) = stream.next().await {
+            while let Some(event) = next_stream_event_with_cancel(&mut stream, &cancel_flag).await {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    break;
+                }
                 match event {
                     StreamEvent::Content(content) => {
                         consensus_content.push_str(&content);
@@ -1629,7 +1664,9 @@ async fn execute_collaborative(
                         break;
                     }
                     StreamEvent::Error(e) => {
-                        consensus_error = Some(e);
+                        if e != "Cancelled" {
+                            consensus_error = Some(e);
+                        }
                         break;
                     }
                 }
@@ -1664,6 +1701,7 @@ async fn execute_competitive(
     system_prompt: &str,
     mut current_streaming: Signal<HashMap<String, String>>,
     mut conversation_history: Signal<Vec<ChoiceRound>>,
+    cancel_flag: Arc<AtomicBool>,
 ) {
     // Phase 1: Proposals
     let proposal_prompt = format!(
@@ -1683,37 +1721,35 @@ async fn execute_competitive(
         let mut last_update = std::time::Instant::now();
         const UPDATE_INTERVAL_MS: u64 = 50; // ~20fps
 
-        while let Some(event) = rx.recv().await {
+        while let Some(event) = recv_multi_event_with_cancel(&mut rx, &cancel_flag).await {
+            if cancel_flag.load(Ordering::SeqCst) {
+                break;
+            }
             let model_id = event.model_id.clone();
 
             match event.event {
                 StreamEvent::Content(content) => {
-                    // Accumulate in buffer instead of writing immediately
                     content_buffer
                         .entry(model_id.clone())
                         .and_modify(|s| s.push_str(&content))
                         .or_insert(content);
-                    
-                    // Throttle updates: only write to signal every 16ms
+
                     if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
-                        // Flush only the active model to reduce cloning work.
                         if let Some(accumulated) = content_buffer.get(&model_id) {
                             let _ = try_signal_update(&mut current_streaming, |responses| {
                                 responses.insert(model_id.clone(), accumulated.clone());
                             });
                         }
-                        
                         last_update = std::time::Instant::now();
                     }
                 }
                 StreamEvent::Done => {
-                    // Flush final accumulated content
                     if let Some(accumulated) = content_buffer.get(&model_id) {
                         let _ = try_signal_update(&mut current_streaming, |responses| {
                             responses.insert(model_id.clone(), accumulated.clone());
                         });
                     }
-                    
+
                     let final_content = try_signal_read(&current_streaming, |responses| {
                         responses.get(&model_id).cloned().unwrap_or_default()
                     })
@@ -1731,6 +1767,9 @@ async fn execute_competitive(
                     });
                 }
                 StreamEvent::Error(error) => {
+                    if error == "Cancelled" {
+                        break;
+                    }
                     phase1_results.insert(
                         model_id.clone(),
                         ModelProposal {
@@ -1744,6 +1783,10 @@ async fn execute_competitive(
                     });
                 }
             }
+        }
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return;
         }
     }
 
@@ -1782,7 +1825,10 @@ async fn execute_competitive(
 
             if let Ok(mut stream) = client.stream_chat_completion(model_id.clone(), voting_messages).await {
                 let mut vote_response = String::new();
-                while let Some(event) = stream.next().await {
+                while let Some(event) = next_stream_event_with_cancel(&mut stream, &cancel_flag).await {
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
                     match event {
                         StreamEvent::Content(content) => {
                             vote_response.push_str(&content);
@@ -1798,6 +1844,9 @@ async fn execute_competitive(
                             break;
                         }
                         StreamEvent::Error(e) => {
+                            if e == "Cancelled" {
+                                break;
+                            }
                             phase2_votes.push(ModelVote {
                                 voter_id: model_id.clone(),
                                 voted_for: None,
@@ -1809,6 +1858,14 @@ async fn execute_competitive(
                     }
                 }
             }
+
+            if cancel_flag.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return;
         }
 
         // Compute tallies

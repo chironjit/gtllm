@@ -1,5 +1,6 @@
 use futures::stream::{Stream, StreamExt};
 use reqwest::Client;
+use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -13,7 +14,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const OPENROUTER_API_BASE: &str = "https://openrouter.ai/api/v1";
 const APP_NAME: &str = "gtllm";
-const APP_URL: &str = "https://github.com/yourusername/gtllm"; // Update with your repo URL
+const APP_URL: &str = "https://github.com/chironjit/gtllm";
 
 // ============================================================================
 // API Types - Request
@@ -255,6 +256,13 @@ impl OpenRouterClient {
         })
     }
 
+    fn with_app_headers(&self, request: RequestBuilder) -> RequestBuilder {
+        request
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", APP_URL)
+            .header("X-Title", APP_NAME)
+    }
+
     // ========================================================================
     // Fetch Available Models
     // ========================================================================
@@ -263,11 +271,7 @@ impl OpenRouterClient {
         let url = format!("{}/models", OPENROUTER_API_BASE);
 
         let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", APP_URL)
-            .header("X-Title", APP_NAME)
+            .with_app_headers(self.client.get(&url))
             .send()
             .await
             .map_err(|e| format!("Failed to fetch models: {}", e))?;
@@ -313,11 +317,7 @@ impl OpenRouterClient {
         let url = format!("{}/credits", OPENROUTER_API_BASE);
 
         let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", APP_URL)
-            .header("X-Title", APP_NAME)
+            .with_app_headers(self.client.get(&url))
             .send()
             .await
             .map_err(|e| format!("Failed to fetch credits: {}", e))?;
@@ -383,11 +383,7 @@ impl OpenRouterClient {
         let url = format!("{}/chat/completions", OPENROUTER_API_BASE);
 
         let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", APP_URL)
-            .header("X-Title", APP_NAME)
+            .with_app_headers(self.client.post(&url))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
@@ -531,11 +527,7 @@ impl OpenRouterClient {
         let url = format!("{}/chat/completions", OPENROUTER_API_BASE);
 
         let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", APP_URL)
-            .header("X-Title", APP_NAME)
+            .with_app_headers(self.client.post(&url))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()

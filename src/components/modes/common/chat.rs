@@ -1,4 +1,7 @@
-use crate::utils::{parse_message_content, parse_inline_elements, ContentSegment, InlineSegment, Message, Theme};
+use crate::utils::{
+    parse_inline_elements, parse_message_content, ContentSegment, InlineSegment, ListBlock,
+    Message, TableAlignment, TableBlock, Theme,
+};
 use dioxus::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -50,59 +53,19 @@ fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
-fn group_segments(segments: Vec<ContentSegment>) -> Vec<ContentSegment> {
-    let mut grouped_segments: Vec<ContentSegment> = Vec::new();
-    let mut current_list: Vec<String> = Vec::new();
+fn parse_content_cached(content: &str) -> Vec<ContentSegment> {
+    let key = content_hash(content);
 
-    for segment in segments {
-        match segment {
-            ContentSegment::ListItem(text) => {
-                current_list.push(text);
-            }
-            other => {
-                if !current_list.is_empty() {
-                    let list_items = current_list.drain(..).collect::<Vec<_>>();
-                    grouped_segments.push(ContentSegment::ListItem(format!(
-                        "\u{0001}LIST_GROUP\u{0001}{}",
-                        list_items.join("\u{0001}ITEM\u{0001}")
-                    )));
-                }
-                grouped_segments.push(other);
-            }
-        }
-    }
-
-    if !current_list.is_empty() {
-        let list_items = current_list.drain(..).collect::<Vec<_>>();
-        grouped_segments.push(ContentSegment::ListItem(format!(
-            "\u{0001}LIST_GROUP\u{0001}{}",
-            list_items.join("\u{0001}ITEM\u{0001}")
-        )));
-    }
-
-    grouped_segments
-}
-
-async fn parse_content_cached(content: String) -> Vec<ContentSegment> {
-    let key = content_hash(&content);
     if let Ok(cache) = parsed_cache().lock() {
-        if let Some(cached) = cache.get(key, &content) {
+        if let Some(cached) = cache.get(key, content) {
             return cached;
         }
     }
 
-    let content_for_parse = content.clone();
-    let parsed = tokio::task::spawn_blocking(move || {
-        let segments = parse_message_content(&content_for_parse);
-        group_segments(segments)
-    })
-    .await
-    .unwrap_or_else(|_| {
-        vec![ContentSegment::Text(content.clone())]
-    });
+    let parsed = parse_message_content(content);
 
     if let Ok(mut cache) = parsed_cache().lock() {
-        cache.insert(key, content, parsed.clone());
+        cache.insert(key, content.to_string(), parsed.clone());
     }
 
     parsed
@@ -113,86 +76,284 @@ fn get_user_avatar() -> &'static str {
 }
 
 fn get_assistant_avatar() -> &'static str {
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect fill='%236366f1' width='40' height='40' rx='20'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='white' font-size='20'%3E>%3C/text%3E%3C/svg%3E"
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect fill='%236366f1' width='40' height='40' rx='20'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='white' font-size='20'%3E%3E%3C/text%3E%3C/svg%3E"
+}
+
+#[component]
+fn InlineNodes(theme: Signal<Theme>, segments: Vec<InlineSegment>) -> Element {
+    let _theme_value = theme.read();
+
+    rsx! {
+        for segment in segments {
+            match segment {
+                InlineSegment::Text(text) => rsx! {
+                    span { "{text}" }
+                },
+                InlineSegment::Bold(children) => rsx! {
+                    strong {
+                        class: "font-semibold",
+                        InlineNodes { theme, segments: children }
+                    }
+                },
+                InlineSegment::Italic(children) => rsx! {
+                    em {
+                        class: "italic",
+                        InlineNodes { theme, segments: children }
+                    }
+                },
+                InlineSegment::BoldItalic(children) => rsx! {
+                    strong {
+                        class: "font-semibold italic",
+                        InlineNodes { theme, segments: children }
+                    }
+                },
+                InlineSegment::Link { text, url } => rsx! {
+                    a {
+                        href: "{url}",
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        class: "text-[var(--color-primary)] underline underline-offset-2 break-all",
+                        InlineNodes { theme, segments: text }
+                    }
+                },
+                InlineSegment::InlineCode(code) => rsx! {
+                    code {
+                        class: "rounded bg-[var(--color-base-300)] px-1.5 py-0.5 font-mono text-[0.95em]",
+                        "{code}"
+                    }
+                },
+                InlineSegment::Formula(formula) => rsx! {
+                    code {
+                        class: "rounded border border-[var(--color-base-300)] bg-[var(--color-base-200)] px-1.5 py-0.5 font-mono italic text-[0.95em]",
+                        "{formula}"
+                    }
+                },
+            }
+        }
+    }
 }
 
 #[component]
 fn InlineMarkdown(theme: Signal<Theme>, text: String) -> Element {
-    let _theme_val = theme.read();
-    let inline_segments = parse_inline_elements(&text);
+    rsx! {
+        InlineNodes {
+            theme,
+            segments: parse_inline_elements(&text),
+        }
+    }
+}
+
+#[component]
+fn ListView(theme: Signal<Theme>, list: ListBlock) -> Element {
+    let list_class = if list.ordered {
+        "list-decimal ml-6 my-3 space-y-2"
+    } else {
+        "list-disc ml-6 my-3 space-y-2"
+    };
 
     rsx! {
-        for segment in inline_segments {
-            match segment {
-                InlineSegment::Text(t) => {
-                    rsx! {
-                        span { "{t}" }
-                    }
-                },
-                InlineSegment::Bold(t) => {
-                    let bold_segments = parse_inline_elements(&t);
-                    rsx! {
-                        strong {
-                            class: "font-bold",
-                            // Parse inline markdown inside bold text (e.g., links)
-                            for segment in bold_segments {
-                                match segment {
-                                    InlineSegment::Text(text) => {
-                                        rsx! { span { "{text}" } }
-                                    },
-                                    InlineSegment::Link { text: link_text, url } => {
-                                        rsx! {
-                                            a {
-                                                href: "{url}",
-                                                target: "_blank",
-                                                rel: "noopener noreferrer",
-                                                class: "text-[var(--color-primary)] hover:underline",
-                                                "{link_text}"
-                                            }
-                                        }
-                                    },
-                                    InlineSegment::InlineCode(code) => {
-                                        rsx! {
-                                            code {
-                                                class: "px-2 py-1 rounded bg-[var(--color-base-300)] text-[var(--color-base-content)] font-mono text-xs sm:text-sm",
-                                                "{code}"
-                                            }
-                                        }
-                                    },
-                                    // Don't nest bold/italic inside bold - just render as text
-                                    InlineSegment::Bold(_) | InlineSegment::Italic(_) => {
-                                        rsx! { span { "{t}" } }
-                                    },
+        if list.ordered {
+            ol {
+                class: "{list_class}",
+                for (index, item) in list.items.into_iter().enumerate() {
+                    li {
+                        key: "{index}",
+                        class: "pl-1",
+                        if !item.text.is_empty() {
+                            div {
+                                class: "whitespace-pre-wrap break-words",
+                                InlineMarkdown {
+                                    theme,
+                                    text: item.text,
+                                }
+                            }
+                        }
+                        for (child_index, child_list) in item.children.into_iter().enumerate() {
+                            div {
+                                key: "{child_index}",
+                                class: "mt-2",
+                                ListView {
+                                    theme,
+                                    list: child_list,
                                 }
                             }
                         }
                     }
+                }
+            }
+        } else {
+            ul {
+                class: "{list_class}",
+                for (index, item) in list.items.into_iter().enumerate() {
+                    li {
+                        key: "{index}",
+                        class: "pl-1",
+                        if !item.text.is_empty() {
+                            div {
+                                class: "whitespace-pre-wrap break-words",
+                                InlineMarkdown {
+                                    theme,
+                                    text: item.text,
+                                }
+                            }
+                        }
+                        for (child_index, child_list) in item.children.into_iter().enumerate() {
+                            div {
+                                key: "{child_index}",
+                                class: "mt-2",
+                                ListView {
+                                    theme,
+                                    list: child_list,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn table_cell_alignment_class(alignment: &TableAlignment) -> &'static str {
+    match alignment {
+        TableAlignment::Left => "text-left",
+        TableAlignment::Center => "text-center",
+        TableAlignment::Right => "text-right",
+        TableAlignment::None => "text-left",
+    }
+}
+
+#[component]
+fn TableView(theme: Signal<Theme>, table: TableBlock) -> Element {
+    rsx! {
+        div {
+            class: "my-4 overflow-x-auto rounded-xl border border-[var(--color-base-300)]",
+            table {
+                class: "min-w-full border-collapse text-sm sm:text-base",
+                thead {
+                    class: "bg-[var(--color-base-200)]",
+                    tr {
+                        for (index, header) in table.headers.iter().enumerate() {
+                            th {
+                                key: "{index}",
+                                class: "whitespace-pre-wrap break-words border-b border-[var(--color-base-300)] px-4 py-3 font-semibold text-[var(--color-base-content)] {table_cell_alignment_class(table.alignments.get(index).unwrap_or(&TableAlignment::None))}",
+                                InlineMarkdown {
+                                    theme,
+                                    text: header.clone(),
+                                }
+                            }
+                        }
+                    }
+                }
+                tbody {
+                    for (row_index, row) in table.rows.iter().enumerate() {
+                        tr {
+                            key: "{row_index}",
+                            class: if row_index % 2 == 0 {
+                                "bg-[var(--color-base-100)]"
+                            } else {
+                                "bg-[var(--color-base-200)]/40"
+                            },
+                            for (cell_index, cell) in row.iter().enumerate() {
+                                td {
+                                    key: "{cell_index}",
+                                    class: "whitespace-pre-wrap break-words border-t border-[var(--color-base-300)] px-4 py-3 align-top text-[var(--color-base-content)] {table_cell_alignment_class(table.alignments.get(cell_index).unwrap_or(&TableAlignment::None))}",
+                                    InlineMarkdown {
+                                        theme,
+                                        text: cell.clone(),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn BlockNodes(theme: Signal<Theme>, segments: Vec<ContentSegment>) -> Element {
+    rsx! {
+        for (index, segment) in segments.into_iter().enumerate() {
+            match segment {
+                ContentSegment::Paragraph(text) => rsx! {
+                    p {
+                        key: "{index}",
+                        class: "whitespace-pre-wrap break-words leading-7",
+                        InlineMarkdown { theme, text }
+                    }
                 },
-                InlineSegment::Italic(t) => {
+                ContentSegment::Header { level, text } => {
+                    let header_class = match level {
+                        1 => "text-2xl sm:text-3xl font-bold leading-tight mt-2",
+                        2 => "text-xl sm:text-2xl font-bold leading-tight mt-2",
+                        3 => "text-lg sm:text-xl font-semibold leading-tight mt-1",
+                        4 => "text-base sm:text-lg font-semibold leading-tight mt-1",
+                        5 => "text-sm sm:text-base font-semibold uppercase tracking-wide mt-1",
+                        _ => "text-sm font-semibold uppercase tracking-wide mt-1",
+                    };
+
                     rsx! {
-                        em {
-                            class: "italic",
-                            "{t}"
+                        match level {
+                            1 => rsx! { h1 { key: "{index}", class: "{header_class}", InlineMarkdown { theme, text } } },
+                            2 => rsx! { h2 { key: "{index}", class: "{header_class}", InlineMarkdown { theme, text } } },
+                            3 => rsx! { h3 { key: "{index}", class: "{header_class}", InlineMarkdown { theme, text } } },
+                            4 => rsx! { h4 { key: "{index}", class: "{header_class}", InlineMarkdown { theme, text } } },
+                            5 => rsx! { h5 { key: "{index}", class: "{header_class}", InlineMarkdown { theme, text } } },
+                            _ => rsx! { h6 { key: "{index}", class: "{header_class}", InlineMarkdown { theme, text } } },
+                        }
+                    }
+                }
+                ContentSegment::CodeBlock { language, code } => rsx! {
+                    div {
+                        key: "{index}",
+                        class: "overflow-hidden rounded-xl border border-[var(--color-base-300)] bg-[var(--color-base-200)]",
+                        if !language.is_empty() {
+                            div {
+                                class: "border-b border-[var(--color-base-300)] px-4 py-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-base-content)]/70",
+                                "{language}"
+                            }
+                        }
+                        pre {
+                            class: "overflow-x-auto p-4",
+                            code {
+                                class: "font-mono text-xs sm:text-sm leading-6 text-[var(--color-base-content)]",
+                                "{code}"
+                            }
                         }
                     }
                 },
-                InlineSegment::Link { text: t, url: u } => {
-                    rsx! {
-                        a {
-                            href: "{u}",
-                            target: "_blank",
-                            rel: "noopener noreferrer",
-                            class: "text-[var(--color-primary)] hover:underline",
-                            "{t}"
-                        }
+                ContentSegment::FormulaBlock(formula) => rsx! {
+                    div {
+                        key: "{index}",
+                        class: "overflow-x-auto rounded-xl border border-[var(--color-base-300)] bg-[var(--color-base-200)] px-4 py-3 font-mono italic text-sm sm:text-base leading-7",
+                        "{formula}"
                     }
                 },
-                InlineSegment::InlineCode(c) => {
-                    rsx! {
-                        code {
-                            class: "px-2 py-1 rounded bg-[var(--color-base-300)] text-[var(--color-base-content)] font-mono text-sm",
-                            "{c}"
-                        }
+                ContentSegment::Table(table) => rsx! {
+                    div {
+                        key: "{index}",
+                        TableView { theme, table }
+                    }
+                },
+                ContentSegment::List(list) => rsx! {
+                    div {
+                        key: "{index}",
+                        ListView { theme, list }
+                    }
+                },
+                ContentSegment::Blockquote(children) => rsx! {
+                    blockquote {
+                        key: "{index}",
+                        class: "border-l-4 border-[var(--color-primary)]/50 bg-[var(--color-base-200)]/60 pl-4 py-2 italic",
+                        BlockNodes { theme, segments: children }
+                    }
+                },
+                ContentSegment::HorizontalRule => rsx! {
+                    hr {
+                        key: "{index}",
+                        class: "border-0 border-t border-[var(--color-base-300)] my-2",
                     }
                 },
             }
@@ -202,149 +363,21 @@ fn InlineMarkdown(theme: Signal<Theme>, text: String) -> Element {
 
 #[component]
 pub fn FormattedText(theme: Signal<Theme>, content: String) -> Element {
-    let _theme_val = theme.read();
-    let mut parsed_content = use_signal(String::new);
-    let mut grouped_segments = use_signal(|| None::<Vec<ContentSegment>>);
-
-    if *parsed_content.read() != content {
-        let request_content = content.clone();
-        parsed_content.set(request_content.clone());
-        grouped_segments.set(None);
-
-        let mut grouped_segments_clone = grouped_segments.clone();
-        let parsed_content_clone = parsed_content.clone();
-        spawn(async move {
-            let parsed = parse_content_cached(request_content.clone()).await;
-            if *parsed_content_clone.read() == request_content {
-                grouped_segments_clone.set(Some(parsed));
-            }
-        });
-    }
+    let _theme_value = theme.read();
+    let segments = parse_content_cached(&content);
 
     rsx! {
         div {
-            class: "space-y-2 prose prose-sm sm:prose-base md:prose-lg max-w-none",
-            if let Some(parsed) = grouped_segments.read().as_ref() {
-                for segment in parsed.iter() {
-                    match segment {
-                        ContentSegment::Text(text) => {
-                            rsx! {
-                                p {
-                                    class: "whitespace-pre-wrap",
-                                    InlineMarkdown {
-                                        theme,
-                                        text: text.clone(),
-                                    }
-                                }
-                            }
-                        },
-                        ContentSegment::InlineCode(code) => {
-                            rsx! {
-                                code {
-                                    class: "px-2 py-1 rounded bg-[var(--color-base-300)] text-[var(--color-base-content)] font-mono text-sm",
-                                    "{code}"
-                                }
-                            }
-                        },
-                        ContentSegment::CodeBlock { language, code } => {
-                            rsx! {
-                                div {
-                                    class: "rounded-lg overflow-hidden my-4",
-                                    if !language.is_empty() {
-                                        div {
-                                            class: "bg-[var(--color-base-300)] px-4 py-2 text-xs sm:text-sm font-semibold text-[var(--color-base-content)]/70 flex items-center justify-between",
-                                            span {
-                                                "{language}"
-                                            }
-                                        }
-                                    }
-                                    pre {
-                                        class: "bg-[var(--color-base-300)] text-[var(--color-base-content)] p-4 overflow-x-auto m-0",
-                                        code {
-                                            class: "font-mono text-xs sm:text-sm md:text-base leading-relaxed",
-                                            "{code}"
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        ContentSegment::Header { level, text } => {
-                            let header_class = match level {
-                                1 => "text-xl sm:text-2xl md:text-3xl font-bold mt-6 mb-4",
-                                2 => "text-lg sm:text-xl md:text-2xl font-bold mt-5 mb-3",
-                                3 => "text-base sm:text-lg md:text-xl font-bold mt-4 mb-2",
-                                4 => "text-sm sm:text-base md:text-lg font-bold mt-3 mb-2",
-                                5 => "text-xs sm:text-sm md:text-base font-bold mt-2 mb-1",
-                                _ => "text-xs sm:text-sm md:text-base font-bold mt-2 mb-1",
-                            };
-                            rsx! {
-                                match level {
-                                    1 => rsx! { h1 { class: "{header_class} text-[var(--color-base-content)]", InlineMarkdown { theme, text: text.clone() } } },
-                                    2 => rsx! { h2 { class: "{header_class} text-[var(--color-base-content)]", InlineMarkdown { theme, text: text.clone() } } },
-                                    3 => rsx! { h3 { class: "{header_class} text-[var(--color-base-content)]", InlineMarkdown { theme, text: text.clone() } } },
-                                    4 => rsx! { h4 { class: "{header_class} text-[var(--color-base-content)]", InlineMarkdown { theme, text: text.clone() } } },
-                                    5 => rsx! { h5 { class: "{header_class} text-[var(--color-base-content)]", InlineMarkdown { theme, text: text.clone() } } },
-                                    _ => rsx! { h6 { class: "{header_class} text-[var(--color-base-content)]", InlineMarkdown { theme, text: text.clone() } } },
-                                }
-                            }
-                        },
-                        ContentSegment::ListItem(text) => {
-                            if text.starts_with("\u{0001}LIST_GROUP\u{0001}") {
-                                let items_str = text.strip_prefix("\u{0001}LIST_GROUP\u{0001}").unwrap_or("");
-                                let items: Vec<&str> = items_str.split("\u{0001}ITEM\u{0001}").collect();
-                                rsx! {
-                                    ul {
-                                        class: "list-disc ml-6 my-2 space-y-1",
-                                        for item in items {
-                                            if !item.is_empty() {
-                                                li {
-                                                    InlineMarkdown {
-                                                        theme,
-                                                        text: item.to_string(),
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                rsx! {
-                                    ul {
-                                        class: "list-disc ml-6 my-2",
-                                        li {
-                                            InlineMarkdown {
-                                                theme,
-                                                text: text.clone(),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        ContentSegment::Blockquote(text) => {
-                            rsx! {
-                                blockquote {
-                                    class: "border-l-4 border-[var(--color-base-300)] pl-4 py-2 my-2 italic text-[var(--color-base-content)]/80",
-                                    InlineMarkdown {
-                                        theme,
-                                        text: text.clone(),
-                                    }
-                                }
-                            }
-                        },
-                        ContentSegment::HorizontalRule => {
-                            rsx! {
-                                hr {
-                                    class: "border-t border-[var(--color-base-300)] my-4",
-                                }
-                            }
-                        },
-                    }
+            class: "space-y-3 text-sm sm:text-base text-[var(--color-base-content)]",
+            if segments.is_empty() {
+                div {
+                    class: "whitespace-pre-wrap break-words",
+                    "{content}"
                 }
             } else {
-                div {
-                    class: "whitespace-pre-wrap break-words text-[var(--color-base-content)]/90",
-                    "{content}"
+                BlockNodes {
+                    theme,
+                    segments,
                 }
             }
         }
@@ -358,7 +391,7 @@ pub fn ChatDisplay(
     empty_title: String,
     empty_description: String,
 ) -> Element {
-    let _theme_val = theme.read();
+    let _theme_value = theme.read();
 
     rsx! {
         div {
@@ -366,25 +399,25 @@ pub fn ChatDisplay(
 
             if messages.read().is_empty() {
                 div {
-                    class: "flex flex-col items-center justify-center h-full max-w-2xl mx-auto text-center",
+                    class: "flex h-full max-w-2xl mx-auto flex-col items-center justify-center text-center",
 
                     div {
-                        class: "text-6xl mb-6",
+                        class: "mb-6 text-6xl",
                         "🎮"
                     }
 
                     h2 {
-                        class: "text-xl sm:text-2xl md:text-3xl font-bold text-[var(--color-base-content)] mb-3",
+                        class: "mb-3 text-xl sm:text-2xl md:text-3xl font-bold text-[var(--color-base-content)]",
                         "{empty_title}"
                     }
 
                     p {
-                        class: "text-[var(--color-base-content)]/80 mb-6 text-base sm:text-lg md:text-xl",
+                        class: "mb-6 text-base sm:text-lg md:text-xl text-[var(--color-base-content)]/80",
                         "{empty_description}"
                     }
 
                     div {
-                        class: "inline-flex items-center px-4 py-2 bg-[var(--color-base-200)] rounded-lg shadow-sm border border-[var(--color-base-300)]",
+                        class: "inline-flex items-center rounded-lg border border-[var(--color-base-300)] bg-[var(--color-base-200)] px-4 py-2 shadow-sm",
                         div {
                             class: "text-sm sm:text-base font-medium text-[var(--color-base-content)]",
                             "Start chatting below"
@@ -402,11 +435,11 @@ pub fn ChatDisplay(
                             rsx! {
                                 div {
                                     key: "{message.id}",
-                                    class: "flex items-start mb-4",
+                                    class: "mb-4 flex items-start",
 
                                     if !is_user {
                                         img {
-                                            class: "rounded-full mr-4",
+                                            class: "mr-4 rounded-full",
                                             src: "{get_assistant_avatar()}",
                                             width: "40",
                                             height: "40",
@@ -423,7 +456,7 @@ pub fn ChatDisplay(
                                                 div {
                                                     class: "max-w-2xl",
                                                     div {
-                                                        class: "text-sm sm:text-base bg-[var(--color-primary)] text-[var(--color-primary-content)] p-3 sm:p-4 rounded-lg rounded-tr-none border border-transparent mb-1",
+                                                        class: "mb-1 rounded-lg rounded-tr-none border border-transparent bg-[var(--color-primary)] p-3 sm:p-4 text-[var(--color-primary-content)]",
                                                         FormattedText {
                                                             theme,
                                                             content: message.content.clone(),
@@ -432,7 +465,7 @@ pub fn ChatDisplay(
                                                     div {
                                                         class: "flex items-center justify-end",
                                                         div {
-                                                            class: "text-xs text-[var(--color-base-content)]/70 font-medium",
+                                                            class: "text-xs font-medium text-[var(--color-base-content)]/70",
                                                             "{message.timestamp}"
                                                         }
                                                     }
@@ -441,9 +474,9 @@ pub fn ChatDisplay(
                                         } else {
                                             div {
                                                 div {
-                                                    class: "text-sm sm:text-base bg-[var(--color-base-300)] text-[var(--color-base-content)] p-3 sm:p-4 rounded-lg rounded-tl-none mb-1",
+                                                    class: "mb-1 rounded-lg rounded-tl-none bg-[var(--color-base-300)] p-3 sm:p-4 text-[var(--color-base-content)]",
                                                     div {
-                                                        class: "font-semibold text-[var(--color-base-content)] mb-1 text-sm sm:text-base",
+                                                        class: "mb-1 text-sm sm:text-base font-semibold text-[var(--color-base-content)]",
                                                         "{message.sender}"
                                                     }
                                                     FormattedText {
@@ -454,7 +487,7 @@ pub fn ChatDisplay(
                                                 div {
                                                     class: "flex items-center justify-between",
                                                     div {
-                                                        class: "text-xs sm:text-sm text-[var(--color-base-content)]/70 font-medium",
+                                                        class: "text-xs sm:text-sm font-medium text-[var(--color-base-content)]/70",
                                                         "{message.timestamp}"
                                                     }
                                                 }
@@ -464,7 +497,7 @@ pub fn ChatDisplay(
 
                                     if is_user {
                                         img {
-                                            class: "rounded-full ml-4",
+                                            class: "ml-4 rounded-full",
                                             src: "{get_user_avatar()}",
                                             width: "40",
                                             height: "40",

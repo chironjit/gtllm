@@ -1,9 +1,9 @@
-use super::common::{ChatInput, FormattedText, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, VoteDisplay, VoteTally, VoteTallyProps};
+use super::common::{ChatInput, FormattedText, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, ThinkingIndicator, VoteDisplay, VoteTally, VoteTallyProps};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel,
     recv_multi_event_with_cancel, register_active_run, remove_run, set_run_status,
-    try_signal_read, try_signal_set, try_signal_update, ActiveRunRecord, ChatMessage,
-    ChatHistory, ChatMode, ChatSession, CompetitiveHistory, InputSettings, Model,
+    try_signal_read, try_signal_set, try_signal_update, upsert_session, ActiveRunRecord,
+    ChatMessage, ChatHistory, ChatMode, ChatSession, CompetitiveHistory, InputSettings, Model,
     OpenRouterClient, RunStatus, SessionData, StreamEvent, Theme,
 };
 use dioxus::core::spawn_forever;
@@ -227,8 +227,9 @@ fn compute_tallies(votes: &[ModelVote], model_ids: &[String]) -> (Vec<VoteTally>
 // ============================================================================
 
 #[component]
-pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<String>, on_session_saved: EventHandler<ChatSession>) -> Element {
+pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, input_settings: Signal<InputSettings>, session_id: Option<String>, on_session_saved: EventHandler<ChatSession>, on_save_error: EventHandler<String>) -> Element {
     let active_runs = use_context::<Signal<HashMap<String, ActiveRunRecord>>>();
+    let sessions = use_context::<Signal<Vec<ChatSession>>>();
     // State
     let mut selected_models = use_signal(|| Vec::<String>::new());
     let mut selection_step = use_signal(|| 0usize); // 0 = select models, 1 = chat
@@ -420,7 +421,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             let mut current_phase_clone = current_phase.clone();
             let templates = prompt_templates();
             let session_id_for_save = session_id.clone();
-            let on_session_saved = on_session_saved.clone();
+            let mut sessions_for_task = sessions.clone();
             let selected_models_for_save = selected_models.read().clone();
             let prompt_templates_for_save = prompt_templates.read().clone();
             let run_id = create_run_id(ChatMode::Competitive, &session_id);
@@ -430,6 +431,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
             let run_id_for_task = run_id.clone();
             let mut active_runs_for_task = active_runs.clone();
             let cancel_flag_for_task = cancel_flag.clone();
+            let on_save_error_for_task = on_save_error.clone();
             let task = spawn_forever(async move {
             // Create new round
             let mut round = CompetitiveRound {
@@ -753,9 +755,9 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                         updated_at: ChatHistory::format_timestamp(),
                     };
                     match tokio::task::spawn_blocking(move || ChatHistory::save_session(&session_data)).await {
-                        Err(e) => eprintln!("Failed to save session task: {}", e),
-                        Ok(Err(e)) => eprintln!("Failed to save session: {}", e),
-                        Ok(Ok(_)) => on_session_saved.call(session),
+                        Err(e) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                        Ok(Err(e)) => { let _ = on_save_error_for_task.call(format!("Failed to save session: {}", e)); }
+                        Ok(Ok(_)) => upsert_session(sessions_for_task, session),
                     }
                 }
             }
@@ -1153,13 +1155,26 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                                             let content = current_streaming_responses.read().get(model_id).cloned().unwrap_or_default();
                                                             let is_streaming = current_streaming_responses.read().contains_key(model_id);
 
-                                                            rsx! {
-                                                                ModelResponseCard {
-                                                                    theme,
-                                                                    model_id: model_id.clone(),
-                                                                    content,
-                                                                    error_message: None,
-                                                                    is_streaming,
+                                                            if content.is_empty() && is_streaming {
+                                                                rsx! {
+                                                                    ModelResponseCard {
+                                                                        theme,
+                                                                        model_id: model_id.clone(),
+                                                                        content: String::new(),
+                                                                        error_message: None,
+                                                                        is_streaming,
+                                                                    }
+                                                                    ThinkingIndicator {}
+                                                                }
+                                                            } else {
+                                                                rsx! {
+                                                                    ModelResponseCard {
+                                                                        theme,
+                                                                        model_id: model_id.clone(),
+                                                                        content,
+                                                                        error_message: None,
+                                                                        is_streaming,
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -1223,6 +1238,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                 ChatInput {
                     theme,
                     input_settings,
+                    is_streaming: *is_processing.read(),
                     on_send: send_message,
                 }
             }

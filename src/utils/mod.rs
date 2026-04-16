@@ -7,7 +7,10 @@ mod theme;
 mod types;
 
 pub use chat_history::*;
-pub use formatting::{parse_message_content, parse_inline_elements, ContentSegment, InlineSegment};
+pub use formatting::{
+    parse_inline_elements, parse_message_content, ContentSegment, InlineSegment, ListBlock,
+    TableAlignment, TableBlock,
+};
 pub use openrouter::*;
 pub use run_control::*;
 pub use settings::{Settings, ThemeMode};
