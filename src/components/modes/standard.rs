@@ -1,4 +1,6 @@
-use super::common::{ChatInput, FormattedText, Modal, ModelSelector, ThinkingIndicator};
+use super::common::{
+    ChatInput, FormattedText, Modal, ModelSelector, ThinkingIndicator, AUTO_FIT_RESPONSE_GRID,
+};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel, register_active_run,
     remove_run, set_run_status, try_signal_read, try_signal_set, try_signal_update, upsert_session,
@@ -825,7 +827,7 @@ pub fn Standard(props: StandardProps) -> Element {
                                         } else {
                                             // Multiple models - card grid
                                             div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 w-full",
+                                                class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
                                                 for response in responses {
                                                     div {
                                                         key: "{response.model_id}",
@@ -1011,7 +1013,7 @@ pub fn Standard(props: StandardProps) -> Element {
                                             } else {
                                                 // Multiple models streaming
                                                 div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3 w-full",
+                                                class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
                                                 for model_id in models.iter() {
                                                     div {
                                                         key: "{model_id}",

@@ -1,4 +1,7 @@
-use super::common::{ChatInput, FormattedText, PromptCard, PromptEditorModal, PromptType, ThinkingIndicator};
+use super::common::{
+    ChatInput, FormattedText, PromptCard, PromptEditorModal, PromptType, ThinkingIndicator,
+    AUTO_FIT_RESPONSE_GRID,
+};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel,
     recv_multi_event_with_cancel, register_active_run, remove_run, set_run_status,
@@ -1150,7 +1153,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
 
                                             // Responses grid
                                             div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                                                class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
 
                                                 for response in round.phase1_responses.iter() {
                                                     div {
@@ -1200,7 +1203,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                             }
 
                                             div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                                                class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
 
                                                 for review in round.phase2_reviews.iter() {
                                                     div {
@@ -1307,7 +1310,7 @@ pub fn Collaborative(props: CollaborativeProps) -> Element {
                                                     class: if *current_phase.read() == CollaborativePhase::Consensus {
                                                         "bg-green-500/10 rounded-lg p-4 border-2 border-green-500/50"
                                                     } else {
-                                                        "grid grid-cols-1 md:grid-cols-2 gap-3"
+                                                        "{AUTO_FIT_RESPONSE_GRID} gap-3"
                                                     },
 
                                                     for (model_id, content) in streaming.iter() {

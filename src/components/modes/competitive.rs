@@ -1,4 +1,7 @@
-use super::common::{ChatInput, FormattedText, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal, ThinkingIndicator, VoteDisplay, VoteTally, VoteTallyProps};
+use super::common::{
+    ChatInput, FormattedText, ModelResponseCard, PhaseIndicator, PromptCard, PromptEditorModal,
+    ThinkingIndicator, VoteDisplay, VoteTally, AUTO_FIT_RESPONSE_GRID,
+};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel,
     recv_multi_event_with_cancel, register_active_run, remove_run, set_run_status,
@@ -1076,7 +1079,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                     }
 
                                     div {
-                                        class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                                        class: "{AUTO_FIT_RESPONSE_GRID} gap-4",
 
                                         for proposal in round.phase1_proposals.iter() {
                                             ModelResponseCard {
@@ -1148,7 +1151,7 @@ pub fn Competitive(theme: Signal<Theme>, client: Option<Arc<OpenRouterClient>>, 
                                                 }
 
                                                 div {
-                                                    class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                                                    class: "{AUTO_FIT_RESPONSE_GRID} gap-4",
 
                                                     for model_id in selected_models.read().iter() {
                                                         {

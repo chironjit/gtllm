@@ -11,6 +11,9 @@ mod streaming_indicator;
 mod vote_display;
 mod vote_tally;
 
+pub const AUTO_FIT_RESPONSE_GRID: &str =
+    "grid grid-cols-[repeat(auto-fit,minmax(18rem,1fr))] w-full";
+
 pub use chat::{ChatDisplay, FormattedText};
 pub use input::ChatInput;
 pub use modal::Modal;

@@ -1,4 +1,4 @@
-use super::common::{ChatInput, FormattedText, Modal, ThinkingIndicator};
+use super::common::{ChatInput, FormattedText, Modal, ThinkingIndicator, AUTO_FIT_RESPONSE_GRID};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel, recv_multi_event_with_cancel,
     register_active_run, remove_run, set_run_status, try_signal_read, try_signal_set,
@@ -1082,7 +1082,7 @@ pub fn PvP(props: PvPProps) -> Element {
 
                                     // Bot responses in a grid
                                     div {
-                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 w-full",
+                                        class: "{AUTO_FIT_RESPONSE_GRID} gap-3 mb-4",
 
                                         // Bot 1
                                         div {
@@ -1175,7 +1175,7 @@ pub fn PvP(props: PvPProps) -> Element {
                                 div {
                                     if *is_streaming_bots.read() {
                                         div {
-                                            class: "grid grid-cols-1 md:grid-cols-2 gap-3 mb-4",
+                                            class: "{AUTO_FIT_RESPONSE_GRID} gap-3 mb-4",
 
                                             // Bot 1 streaming
                                             div {

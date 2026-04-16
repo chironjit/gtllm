@@ -1,4 +1,7 @@
-use super::common::{ChatInput, FormattedText, Modal, ModelSelector, ModelResponseCard, ThinkingIndicator};
+use super::common::{
+    ChatInput, FormattedText, Modal, ModelSelector, ModelResponseCard, ThinkingIndicator,
+    AUTO_FIT_RESPONSE_GRID,
+};
 use crate::utils::{
     create_run_id, find_run_for_session, next_stream_event_with_cancel,
     recv_multi_event_with_cancel, register_active_run, remove_run, set_run_status,
@@ -1000,7 +1003,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                             }
 
                                             div {
-                                                class: "grid grid-cols-1 md:grid-cols-2 gap-3 mb-4",
+                                                class: "{AUTO_FIT_RESPONSE_GRID} gap-3 mb-4",
                                                 for decision in round.decisions.iter() {
                                                     div {
                                                         key: "{decision.model_id}",
@@ -1107,7 +1110,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         "Initial Responses"
                                                     }
                                                     div {
-                                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                                                        class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
                                                         for response in collab.phase1_responses.iter() {
                                                             ModelResponseCard {
                                                                 theme,
@@ -1130,7 +1133,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         "Cross-Reviews"
                                                     }
                                                     div {
-                                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                                                        class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
                                                         for review in collab.phase2_reviews.iter() {
                                                             ModelResponseCard {
                                                                 theme,
@@ -1192,7 +1195,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                                         "Proposals"
                                                     }
                                                     div {
-                                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                                                        class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
                                                         for proposal in comp.phase1_proposals.iter() {
                                                             ModelResponseCard {
                                                                 theme,
@@ -1275,7 +1278,7 @@ pub fn Choice(props: ChoiceProps) -> Element {
                                         }
                                     }
                                     div {
-                                        class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                                        class: "{AUTO_FIT_RESPONSE_GRID} gap-3",
                                         for (model_id, content) in current_streaming_responses.read().iter() {
                                             div {
                                                 key: "{model_id}",
